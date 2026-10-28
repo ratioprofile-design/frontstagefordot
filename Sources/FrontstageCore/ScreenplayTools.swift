@@ -9,15 +9,116 @@ public enum TamilTranscoder {
     }
 }
 
+public struct ElementTypography: Codable, Equatable, Sendable {
+    public var fontName: String?
+    public var fontSize: Double?
+    public var isBold: Bool
+    public var isItalic: Bool
+    public var isUnderline: Bool
+    public var isUppercase: Bool
+    public var isTamil: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case fontName, fontSize, isBold, isItalic, isUnderline, isUppercase, isTamil
+    }
+
+    public init(
+        fontName: String? = nil,
+        fontSize: Double? = nil,
+        isBold: Bool = false,
+        isItalic: Bool = false,
+        isUnderline: Bool = false,
+        isUppercase: Bool = false,
+        isTamil: Bool = false
+    ) {
+        self.fontName = fontName
+        self.fontSize = fontSize
+        self.isBold = isBold
+        self.isItalic = isItalic
+        self.isUnderline = isUnderline
+        self.isUppercase = isUppercase
+        self.isTamil = isTamil
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.fontName = try container.decodeIfPresent(String.self, forKey: .fontName)
+        self.fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize)
+        self.isBold = try container.decodeIfPresent(Bool.self, forKey: .isBold) ?? false
+        self.isItalic = try container.decodeIfPresent(Bool.self, forKey: .isItalic) ?? false
+        self.isUnderline = try container.decodeIfPresent(Bool.self, forKey: .isUnderline) ?? false
+        self.isUppercase = try container.decodeIfPresent(Bool.self, forKey: .isUppercase) ?? false
+        self.isTamil = try container.decodeIfPresent(Bool.self, forKey: .isTamil) ?? false
+    }
+}
+
 public struct ScriptLayoutSettings: Codable, Equatable, Sendable {
     public var fontName = "Courier"
     public var fontSize = 12.0
     public var lineHeight = 14.0
     public var paragraphSpacing = 10.0
+    public var elements: [String: ElementTypography] = [:]
+
+    enum CodingKeys: String, CodingKey {
+        case fontName, fontSize, lineHeight, paragraphSpacing, elements
+    }
+
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.fontName = try container.decodeIfPresent(String.self, forKey: .fontName) ?? "Courier"
+        self.fontSize = try container.decodeIfPresent(Double.self, forKey: .fontSize) ?? 12.0
+        self.lineHeight = try container.decodeIfPresent(Double.self, forKey: .lineHeight) ?? 14.0
+        self.paragraphSpacing = try container.decodeIfPresent(Double.self, forKey: .paragraphSpacing) ?? 10.0
+        self.elements = try container.decodeIfPresent([String: ElementTypography].self, forKey: .elements) ?? [:]
+    }
+
     public func validate() throws {
-        guard !fontName.isEmpty, fontName.count <= 120, fontSize.isFinite, (8...24).contains(fontSize),
-              lineHeight.isFinite, (fontSize...40).contains(lineHeight), paragraphSpacing.isFinite, (0...36).contains(paragraphSpacing) else { throw ProjectError.invalidProject("invalid screenplay typography") }
+        guard !fontName.isEmpty, fontName.count <= 120, fontSize.isFinite, (8...36).contains(fontSize),
+              lineHeight.isFinite, (fontSize...60).contains(lineHeight), paragraphSpacing.isFinite, (0...48).contains(paragraphSpacing) else {
+            throw ProjectError.invalidProject("invalid screenplay typography")
+        }
+        for (_, elem) in elements {
+            if let f = elem.fontName {
+                guard f.count <= 120 else { throw ProjectError.invalidProject("invalid element font name") }
+            }
+            if let s = elem.fontSize {
+                guard s.isFinite, (8...36).contains(s) else { throw ProjectError.invalidProject("invalid element font size") }
+            }
+        }
+    }
+
+    public func effectiveFontName(for element: ScreenplayElement) -> String {
+        if let name = elements[element.rawValue]?.fontName, !name.isEmpty { return name }
+        return fontName
+    }
+
+    public func effectiveFontSize(for element: ScreenplayElement) -> Double {
+        if let size = elements[element.rawValue]?.fontSize { return size }
+        return fontSize
+    }
+
+    public func isBold(for element: ScreenplayElement) -> Bool {
+        if let override = elements[element.rawValue]?.isBold { return override }
+        return [.sceneHeading, .transition, .shot].contains(element)
+    }
+
+    public func isItalic(for element: ScreenplayElement) -> Bool {
+        return elements[element.rawValue]?.isItalic ?? false
+    }
+
+    public func isUnderline(for element: ScreenplayElement) -> Bool {
+        return elements[element.rawValue]?.isUnderline ?? false
+    }
+
+    public func isUppercase(for element: ScreenplayElement) -> Bool {
+        if let override = elements[element.rawValue]?.isUppercase { return override }
+        return [.sceneHeading, .character, .transition, .shot].contains(element)
+    }
+
+    public func isTamil(for element: ScreenplayElement) -> Bool {
+        return elements[element.rawValue]?.isTamil ?? false
     }
 }
 

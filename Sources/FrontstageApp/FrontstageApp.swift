@@ -7,21 +7,70 @@ import FrontstageCore
 
 @main
 struct FrontstageApp: App {
-    @StateObject private var workspace = Workspace(recoveryStore: .applicationDefault())
+    @StateObject private var workspace: Workspace
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "NSConvolutionOverride1": 5.0,
+            "NSConvolutionOverride2": 5.0
+        ])
+        UserDefaults.standard.set(5.0, forKey: "NSConvolutionOverride1")
+        UserDefaults.standard.set(5.0, forKey: "NSConvolutionOverride2")
+        _workspace = StateObject(wrappedValue: Workspace(recoveryStore: .applicationDefault()))
+    }
+
     var body: some SwiftUI.Scene {
-        Window("Frontstage", id: "workspace") {
+        Window("DOT", id: "workspace") {
             WorkspaceView(workspace: workspace)
-                .frame(minWidth: 850, minHeight: 560)
-                .onAppear { delegate.workspace = workspace; workspace.checkRecovery() }
+                .frame(minWidth: 960, minHeight: 560)
+                .onAppear {
+                    delegate.workspace = workspace
+                    workspace.loadRecentProjects()
+                    workspace.checkRecovery()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        delegate.setupRecentMenu()
+                    }
+                    if !delegate.hasPendingOpenFile {
+                        workspace.restoreLastProjectIfNeeded()
+                    }
+                }
+                .navigationTitle("")
+        }
+        .windowToolbarStyle(.unified(showsTitle: false))
+        Settings {
+            PreferencesView(workspace: workspace)
         }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    workspace.showPreferences = true
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("New Project", action: workspace.newProject).keyboardShortcut("n")
                 Button("Open or Import…", action: workspace.open).keyboardShortcut("o")
                 Button("Import Script Document…", action: workspace.importScriptDocument)
                 Button("Import Spreadsheet to Research…", action: workspace.importSpreadsheet)
+            }
+            CommandGroup(after: .newItem) {
+                Menu("Open Recent") {
+                    if workspace.recentProjects.isEmpty {
+                        Button("No Recent Projects") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(workspace.recentProjects, id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                workspace.openFile(at: url)
+                            }
+                        }
+                        Divider()
+                        Button("Clear Menu") {
+                            workspace.clearRecentProjects()
+                        }
+                    }
+                }
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Save", action: workspace.save).keyboardShortcut("s")
@@ -31,16 +80,27 @@ struct FrontstageApp: App {
             CommandGroup(after: .saveItem) {
                 Button("Export Screenplay PDF…", action: workspace.exportPDF)
                     .disabled(!workspace.hasActiveScenes)
-                Button("Export Screenplay DOCX…", action: workspace.exportDOCX).disabled(!workspace.hasActiveScenes)
+                Button("Export Final Draft (.fdx)…", action: workspace.exportFDX)
+                    .disabled(!workspace.hasActiveScenes)
+                Button("Export Fountain (.fountain)…", action: workspace.exportFountain)
+                    .disabled(!workspace.hasActiveScenes)
+                Button("Export Screenplay DOCX…", action: workspace.exportDOCX)
+                    .disabled(!workspace.hasActiveScenes)
                 Button("Export Schedule XLSX…", action: workspace.exportScheduleXLSX)
+                Divider()
                 Button("Print Screenplay…", action: workspace.printScreenplay).keyboardShortcut("p")
                     .disabled(!workspace.hasActiveScenes)
             }
             CommandMenu("Screenplay") {
-                ForEach(Array(ScreenplayElement.editable.enumerated()), id: \.element.rawValue) { index, element in
-                    Button(element.label) { workspace.focusedScreenplayController?.format(element) }
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
-                        .disabled(workspace.selectedScene == nil || (workspace.mode != .edit && workspace.mode != .board))
+                ForEach(Array(ScreenplayElement.ordered.enumerated()), id: \.element.rawValue) { index, element in
+                    Button("\(index + 1)  \(element.label)") {
+                        if element == .sceneHeading, let panel = NSApp.keyWindow as? BeatEditorPanel {
+                            panel.focusSlugline()
+                        } else {
+                            (workspace.focusedScreenplayController ?? workspace.scriptController("write-continuous")).format(element)
+                        }
+                    }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
                 }
             }
             CommandMenu("Project") {
@@ -48,14 +108,187 @@ struct FrontstageApp: App {
                     .keyboardShortcut("z", modifiers: [.command, .option]).disabled(!workspace.history.canUndo)
                 Button("Redo \(workspace.history.redoLabel)", action: workspace.redoProject)
                     .keyboardShortcut("z", modifiers: [.command, .option, .shift]).disabled(!workspace.history.canRedo)
+                Divider()
+                Button("Pulled-Out Beats Shelf…") { workspace.showPulledOutShelf = true }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
             }
         }
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class RecentProjectsMenuDelegate: NSObject, NSMenuDelegate {
+    static let shared = RecentProjectsMenuDelegate()
     weak var workspace: Workspace?
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let recents: [URL] = {
+            if let list = workspace?.recentProjects, !list.isEmpty { return list }
+            let paths = UserDefaults.standard.stringArray(forKey: "frontstage_recent_projects") ?? []
+            return paths.compactMap { path in
+                let url = URL(fileURLWithPath: path)
+                return FileManager.default.fileExists(atPath: url.path) ? url : nil
+            }
+        }()
+
+        if recents.isEmpty {
+            let emptyItem = NSMenuItem(title: "No Recent Projects", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            menu.addItem(emptyItem)
+        } else {
+            for url in recents {
+                let item = NSMenuItem(title: url.lastPathComponent, action: #selector(openRecentItem(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = url
+                item.image = NSWorkspace.shared.icon(forFile: url.path)
+                item.image?.size = NSSize(width: 16, height: 16)
+                menu.addItem(item)
+            }
+            menu.addItem(NSMenuItem.separator())
+            let clearItem = NSMenuItem(title: "Clear Menu", action: #selector(clearRecentItems(_:)), keyEquivalent: "")
+            clearItem.target = self
+            menu.addItem(clearItem)
+        }
+    }
+
+    @objc func openRecentItem(_ sender: NSMenuItem) {
+        if let url = sender.representedObject as? URL {
+            let targetWorkspace = workspace ?? (NSApp.delegate as? AppDelegate)?.workspace
+            targetWorkspace?.openFile(at: url)
+        }
+    }
+
+    @objc func clearRecentItems(_ sender: NSMenuItem) {
+        workspace?.clearRecentProjects()
+        UserDefaults.standard.removeObject(forKey: "frontstage_recent_projects")
+        NSDocumentController.shared.clearRecentDocuments(nil)
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var workspace: Workspace? {
+        didSet {
+            RecentProjectsMenuDelegate.shared.workspace = workspace
+            setupRecentMenu()
+            if let pending = pendingOpenFile, let workspace {
+                _ = workspace.openFile(at: pending)
+                pendingOpenFile = nil
+            }
+        }
+    }
+    private(set) var pendingOpenFile: URL?
+    var hasPendingOpenFile: Bool { pendingOpenFile != nil }
+
+    func setupRecentMenu() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        for item in mainMenu.items {
+            if let submenu = item.submenu {
+                if submenu.items.contains(where: { $0.title.contains("Open") || $0.title.contains("New Project") }) {
+                    let subMenu: NSMenu
+                    if let existing = submenu.item(withTitle: "Open Recent"), let sub = existing.submenu {
+                        subMenu = sub
+                    } else {
+                        let recentMenuItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
+                        let newSub = NSMenu(title: "Open Recent")
+                        newSub.delegate = RecentProjectsMenuDelegate.shared
+                        recentMenuItem.submenu = newSub
+
+                        if let openIdx = submenu.items.firstIndex(where: { $0.title.contains("Open") }) {
+                            submenu.insertItem(recentMenuItem, at: openIdx + 1)
+                        } else {
+                            submenu.insertItem(recentMenuItem, at: min(1, submenu.items.count))
+                        }
+                        subMenu = newSub
+                    }
+                    RecentProjectsMenuDelegate.shared.menuNeedsUpdate(subMenu)
+                    return
+                }
+            }
+        }
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: [
+            "NSConvolutionOverride1": 5.0,
+            "NSConvolutionOverride2": 5.0
+        ])
+        UserDefaults.standard.set(5.0, forKey: "NSConvolutionOverride1")
+        UserDefaults.standard.set(5.0, forKey: "NSConvolutionOverride2")
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        for window in NSApp.windows {
+            window.contentView?.wantsLayer = true
+            window.contentView?.layer?.cornerRadius = 5
+            window.contentView?.layer?.masksToBounds = false
+        }
+        updateDockIcon()
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateDockIcon()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                TamilInputManager.restoreStandardInput()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                if NSApp.keyWindow == nil {
+                    TamilInputManager.restoreStandardInput()
+                }
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSMenu.didBeginTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.setupRecentMenu()
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.setupRecentMenu()
+        }
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        TamilInputManager.restoreStandardInput()
+    }
+
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        let url = URL(fileURLWithPath: filename)
+        if let workspace {
+            return workspace.openFile(at: url)
+        } else {
+            pendingOpenFile = url
+            return true
+        }
+    }
+
+    func updateDockIcon() {
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let name = isDark ? "app_icon_light_standard" : "app_icon_dark_standard"
+        if let url = Bundle.main.url(forResource: name, withExtension: "png") ?? Bundle.main.url(forResource: isDark ? "app_icon_light" : "app_icon_dark", withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = img
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         workspace?.confirmDiscardOrSave() == false ? .terminateCancel : .terminateNow
     }
@@ -98,6 +331,21 @@ final class Workspace: ObservableObject {
     }
     @Published var writeCardsToggle = 0
     @Published var writeInspectorToggle = 0
+    @Published var showInspector: Bool = true {
+        didSet { writeInspectorVisible = showInspector }
+    }
+    func toggleInspector() {
+        showInspector.toggle()
+        writeInspectorToggle += 1
+    }
+    func toggleSidebar() {
+        if mode == .edit {
+            writeCardsVisible.toggle()
+            writeCardsToggle += 1
+        } else {
+            showBoardScript.toggle()
+        }
+    }
     @Published var reader = ScriptReaderSettings()
     @Published var whiteboardRipple = true
     @Published var selectedResearchID: String?
@@ -105,6 +353,8 @@ final class Workspace: ObservableObject {
         didSet { if oldValue != mode { editor.textView?.undoManager?.removeAllActions() } }
     }
     @Published var paper = ScreenplayPaper.a4
+    @Published var showPreferences = false
+    @Published var showPulledOutShelf = false
     @Published private(set) var preview: PDFDocument?
     @Published private(set) var history = ProjectHistory()
     @Published private(set) var recoveryCandidate: Project?
@@ -129,7 +379,62 @@ final class Workspace: ObservableObject {
     private var checkedRecovery = false
     private var recoveryBlocked = false
 
-    init(recoveryStore: RecoveryStore? = nil) { self.recoveryStore = recoveryStore }
+    @Published var restoreLastProjectAutomatically: Bool = UserDefaults.standard.object(forKey: "frontstage_restore_last_project") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(restoreLastProjectAutomatically, forKey: "frontstage_restore_last_project") }
+    }
+    @Published var recentProjects: [URL] = []
+
+    func loadRecentProjects() {
+        let paths = UserDefaults.standard.stringArray(forKey: "frontstage_recent_projects") ?? []
+        recentProjects = paths.compactMap { path in
+            let url = URL(fileURLWithPath: path)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+    }
+
+    func recordRecentProject(_ url: URL) {
+        let path = url.resolvingSymlinksInPath().path
+        var paths = UserDefaults.standard.stringArray(forKey: "frontstage_recent_projects") ?? []
+        paths.removeAll { $0 == path }
+        paths.insert(path, at: 0)
+        if paths.count > 15 {
+            paths = Array(paths.prefix(15))
+        }
+        UserDefaults.standard.set(paths, forKey: "frontstage_recent_projects")
+        UserDefaults.standard.set(path, forKey: "frontstage_last_project_path")
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        loadRecentProjects()
+    }
+
+    func clearRecentProjects() {
+        UserDefaults.standard.removeObject(forKey: "frontstage_recent_projects")
+        NSDocumentController.shared.clearRecentDocuments(nil)
+        recentProjects = []
+    }
+
+    func restoreLastProjectIfNeeded() {
+        guard restoreLastProjectAutomatically else { return }
+        guard saveURL == nil, !hasChanges else { return }
+        if let lastPath = UserDefaults.standard.string(forKey: "frontstage_last_project_path"),
+           FileManager.default.fileExists(atPath: lastPath) {
+            let url = URL(fileURLWithPath: lastPath)
+            do {
+                let imported = try Project.load(from: url)
+                loadCopy(imported)
+                saveURL = url
+                savedProject = imported
+                didSave()
+                recordRecentProject(url)
+            } catch {
+                // If project cannot be loaded, safely continue with fresh project
+            }
+        }
+    }
+
+    init(recoveryStore: RecoveryStore? = nil) {
+        self.recoveryStore = recoveryStore
+        loadRecentProjects()
+    }
 
     func checkRecovery() {
         guard !checkedRecovery else { return }
@@ -200,6 +505,16 @@ final class Workspace: ObservableObject {
         } catch { project = previous; errorMessage = error.localizedDescription }
     }
 
+    func updateScriptLayout(_ action: (inout ScriptLayoutSettings) -> Void) {
+        var layout = project.scriptLayout
+        action(&layout)
+        edit("Script Typography") { try $0.setScriptLayout(layout) }
+        if let data = try? JSONEncoder().encode(layout) {
+            UserDefaults.standard.set(data, forKey: "default_script_layout")
+        }
+        changeID += 1
+    }
+
     func undoProject() {
         guard let previous = history.undo(current: project) else { return }
         project = previous
@@ -250,6 +565,10 @@ final class Workspace: ObservableObject {
         }
         editor.textView?.undoManager?.removeAllActions()
         project = Project(oneBeatPerScene: true)
+        if let defaultData = UserDefaults.standard.data(forKey: "default_script_layout"),
+           let defaultLayout = try? JSONDecoder().decode(ScriptLayoutSettings.self, from: defaultData) {
+            _ = try? project.setScriptLayout(defaultLayout)
+        }
         whiteboardCache = nil
         savedProject = project
         history = ProjectHistory()
@@ -346,30 +665,101 @@ final class Workspace: ObservableObject {
             operation.run()
     }
 
+    @discardableResult
+    func openFile(at url: URL) -> Bool {
+        guard confirmDiscardOrSave() else { return false }
+        do {
+            let imported = try Project.load(from: url)
+            loadCopy(imported)
+            saveURL = url
+            savedProject = imported
+            didSave()
+            recordRecentProject(url)
+            NSApp.activate(ignoringOtherApps: true)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     func open() {
         guard confirmDiscardOrSave() else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json,
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "frontstage") ?? .data,
+            UTType(filenameExtension: "dot") ?? .data,
             UTType(filenameExtension: "backstage") ?? .data,
-            UTType(filenameExtension: "frontstage") ?? .data]
+            .json
+        ]
         panel.allowsMultipleSelection = false
-        panel.message = "Legacy projects are imported as copies. Save them as new Frontstage files."
+        panel.message = "Open a Frontstage or DOT project file."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let imported = try Project.load(from: url)
-            // Every open starts a copy. No source project is ever a default save destination.
-            loadCopy(imported)
-        } catch { errorMessage = error.localizedDescription }
+        openFile(at: url)
     }
 
     func save() { _ = saveCurrent() }
 
+    static func applyFileIcon(to url: URL) {
+        #if os(macOS)
+        let resolved = url.resolvingSymlinksInPath()
+        let image: NSImage? = {
+            if let path = Bundle.main.path(forResource: "DocIcon", ofType: "icns"),
+               let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+            if let path = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
+               let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+            return NSApp?.applicationIconImage
+        }()
+        if let image {
+            NSWorkspace.shared.setIcon(image, forFile: resolved.path, options: [])
+        }
+        #endif
+    }
+
+    static func sanitizeFileName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = trimmed.isEmpty ? "Untitled Screenplay" : trimmed
+        return base
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+    }
+
     @discardableResult
     private func saveCurrent() -> Bool {
-        guard let saveURL else { return saveAs() }
+        guard let currentURL = saveURL else { return saveAs() }
+        let desiredFileName = "\(Self.sanitizeFileName(project.name)).frontstage"
+        let folder = currentURL.deletingLastPathComponent()
+        let targetURL = folder.appendingPathComponent(desiredFileName)
+
+        if currentURL.lastPathComponent != desiredFileName {
+            if FileManager.default.fileExists(atPath: targetURL.path) && targetURL.standardizedFileURL != currentURL.standardizedFileURL {
+                return saveAs()
+            }
+            do {
+                try project.save(to: targetURL)
+                Self.applyFileIcon(to: targetURL)
+                if FileManager.default.fileExists(atPath: currentURL.path) && currentURL.standardizedFileURL != targetURL.standardizedFileURL {
+                    try? FileManager.default.removeItem(at: currentURL)
+                }
+                saveURL = targetURL
+                didSave()
+                recordRecentProject(targetURL)
+                return true
+            } catch {
+                errorMessage = error.localizedDescription
+                return false
+            }
+        }
+
         do {
-            try project.save(to: saveURL)
+            try project.save(to: currentURL)
+            Self.applyFileIcon(to: currentURL)
             didSave()
+            recordRecentProject(currentURL)
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -381,13 +771,19 @@ final class Workspace: ObservableObject {
     func saveAs() -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "frontstage") ?? .json]
-        panel.nameFieldStringValue = "\(project.name.replacingOccurrences(of: "/", with: "-" )).frontstage"
-        panel.message = "Save a native Frontstage copy. Your imported source stays unchanged."
+        let desiredFileName = "\(Self.sanitizeFileName(project.name)).frontstage"
+        panel.nameFieldStringValue = desiredFileName
+        if let currentURL = saveURL {
+            panel.directoryURL = currentURL.deletingLastPathComponent()
+        }
+        panel.message = "Save a Frontstage project copy."
         guard panel.runModal() == .OK, let url = panel.url else { return false }
         do {
             try project.save(to: url)
+            Self.applyFileIcon(to: url)
             saveURL = url
             didSave()
+            recordRecentProject(url)
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -416,14 +812,16 @@ final class Workspace: ObservableObject {
 
 struct WorkspaceView: View {
     @ObservedObject var workspace: Workspace
-    @State private var columns = NavigationSplitViewVisibility.all
 
-    private var workspaceLayout: some View {
-        NavigationSplitView(columnVisibility: $columns) {
-            ScriptSidePaper(workspace: workspace)
-                .navigationSplitViewColumnWidth(min: 320, ideal: 460, max: 700)
-        } detail: {
-            Group {
+    private var isSidebarVisible: Bool {
+        if workspace.mode == .edit {
+            return false
+        }
+        return workspace.showBoardScript
+    }
+
+    private var detailView: some View {
+        Group {
             if workspace.mode == .shared {
                 SharedProjectsView(workspace: workspace, client: workspace.sharedProjects)
             } else if workspace.mode == .studio {
@@ -454,27 +852,71 @@ struct WorkspaceView: View {
             } else {
                 ScriptWritingWorkspace(workspace: workspace)
             }
-            }.background(Color(boardHex: WorkspaceDesign.panelColor))
+        }
+        .background(Color(boardHex: WorkspaceDesign.panelColor))
+    }
+
+    private var workspaceLayout: some View {
+        HSplitView {
+            if isSidebarVisible {
+                ScriptSidePaper(workspace: workspace)
+                    .frame(minWidth: 300, idealWidth: 360, maxWidth: 520)
+            }
+            detailView
         }
     }
-    var body: some View {
-        workspaceLayout
-        .onAppear { if workspace.mode == .edit { columns = .detailOnly } }
-        .onChange(of: workspace.mode) { old, mode in if mode == .edit { columns = .detailOnly } else if old == .edit { columns = workspace.showBoardScript ? .all : .detailOnly } }
-        .onChange(of: workspace.showBoardScript) { visible in columns = workspace.mode != .edit && visible ? .all : .detailOnly }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack {
-                Text(workspace.hasChanges ? "Unsaved project changes" : "No pending changes")
-                Spacer()
-                if !workspace.recoveryStatus.isEmpty { Text(workspace.recoveryStatus) }
-            }.font(.caption).foregroundStyle(.secondary).padding(8).background(.regularMaterial)
+
+    private var bottomStatusBar: some View {
+        HStack {
+            Text(workspace.hasChanges ? "Unsaved project changes" : "No pending changes")
+            Spacer()
+            if !workspace.recoveryStatus.isEmpty { Text(workspace.recoveryStatus) }
         }
-        .toolbar(removing: .sidebarToggle)
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(height: 22)
+        .background(Color(boardHex: WorkspaceDesign.panelColor))
+        .overlay(alignment: .top) {
+            Divider()
+        }
+    }
+
+    private struct WindowSharpener: NSViewRepresentable {
+        func makeNSView(context: Context) -> NSView {
+            let view = NSView()
+            DispatchQueue.main.async {
+                guard let window = view.window else { return }
+                window.contentView?.wantsLayer = true
+                window.contentView?.layer?.cornerRadius = 5
+                window.contentView?.layer?.masksToBounds = false
+            }
+            return view
+        }
+        func updateNSView(_ nsView: NSView, context: Context) {
+            DispatchQueue.main.async {
+                guard let window = nsView.window else { return }
+                window.contentView?.layer?.cornerRadius = 5
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            workspaceLayout
+            bottomStatusBar
+        }
+        .background(WindowSharpener())
         .toolbar { workspaceToolbar }
         .preferredColorScheme(.dark)
         .font(.system(size: 12))
+        .navigationTitle("")
         .onChange(of: workspace.mode) { _, mode in if mode == .pages { workspace.makePreview() } }
         .onChange(of: workspace.paper) { _, _ in if workspace.mode == .pages { workspace.makePreview() } }
+        .sheet(isPresented: $workspace.showPreferences) {
+            PreferencesView(workspace: workspace)
+        }
         .sheet(isPresented: Binding(get: { workspace.recoveryCandidate != nil }, set: { _ in })) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Recover your last session?").font(.title2)
@@ -486,29 +928,322 @@ struct WorkspaceView: View {
                 }
             }.padding(28).frame(width: 440).interactiveDismissDisabled()
         }
-        .alert("Frontstage", isPresented: Binding(
+        .alert("DOT", isPresented: Binding(
             get: { workspace.errorMessage != nil },
             set: { if !$0 { workspace.errorMessage = nil } })) {
                 Button("OK") { workspace.errorMessage = nil }
             } message: { Text(workspace.errorMessage ?? "") }
+        .sheet(isPresented: $workspace.showPulledOutShelf) {
+            PulledOutShelf(workspace: workspace)
+        }
     }
+
     @ToolbarContentBuilder private var workspaceToolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            Button("Toggle navigation", systemImage: "sidebar.left") {
-                if workspace.mode == .edit { workspace.writeCardsToggle += 1 }
-                else { workspace.showBoardScript.toggle() }
+            HStack(spacing: 10) {
+                CompanyLogoView()
+
+                Divider().frame(height: 14)
+
+                Button {
+                    workspace.toggleSidebar()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "sidebar.left")
+                        Text("Sidebar")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .font(.system(size: 11, weight: .medium))
+                .help("Toggle Sidebar (Script / Cards)")
             }
         }
-        ToolbarItemGroup {
-            Picker("View", selection: $workspace.mode) {
-                ForEach(Workspace.Mode.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
-            }.pickerStyle(.menu).frame(width: 140)
-            Picker("Paper", selection: $workspace.paper) {
-                ForEach(ScreenplayPaper.allCases, id: \.self) { paper in Text(paper.label).tag(paper) }
-            }.frame(width: 120)
+
+        ToolbarItem(placement: .principal) {
+            PageTabsView(workspace: workspace)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                workspace.toggleInspector()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "sidebar.right")
+                    Text("Inspector")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
+            .help("Toggle Inspector Panel")
+
             Button("Add Scene", systemImage: "plus", action: workspace.addScene)
+                .help("Add Scene")
             Button("Save", systemImage: "square.and.arrow.down", action: workspace.save)
-            Button("Export PDF", systemImage: "doc.richtext", action: workspace.exportPDF).disabled(!workspace.hasActiveScenes)
+                .help("Save Project")
+
+            Menu {
+                Button {
+                    workspace.exportPDF()
+                } label: {
+                    Label("Export Screenplay PDF…", systemImage: "doc.richtext")
+                }
+                Button {
+                    workspace.exportFDX()
+                } label: {
+                    Label("Export Final Draft (.fdx)…", systemImage: "doc.text")
+                }
+                Button {
+                    workspace.exportFountain()
+                } label: {
+                    Label("Export Fountain (.fountain)…", systemImage: "character.cursor.ibeam")
+                }
+                Divider()
+                Button {
+                    workspace.exportDOCX()
+                } label: {
+                    Label("Export Microsoft Word (.docx)…", systemImage: "doc")
+                }
+                Button {
+                    workspace.exportScheduleXLSX()
+                } label: {
+                    Label("Export Production Schedule (.xlsx)…", systemImage: "tablecells")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("Export")
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
+            .disabled(!workspace.hasActiveScenes)
+            .help("Export Screenplay in various formats (PDF, Final Draft, Fountain, Word)")
+        }
+    }
+}
+
+struct PageTabsView: View {
+    @ObservedObject var workspace: Workspace
+    @State private var hoveredMode: Workspace.Mode?
+
+    private let primaryModes: [(Workspace.Mode, String, String)] = [
+        (.board, "Whiteboard", "rectangle.3.group"),
+        (.edit, "Write", "pencil.line"),
+        (.pages, "Pages", "doc.text")
+    ]
+
+    private let secondaryModes: [(Workspace.Mode, String, String)] = [
+        (.revisions, "Revisions", "clock.arrow.circlepath"),
+        (.people, "People", "person.2"),
+        (.breakdown, "Breakdown", "list.bullet.rectangle"),
+        (.production, "Production", "film"),
+        (.writingTools, "Tools", "wrench.and.screwdriver"),
+        (.studio, "Studio", "books.vertical"),
+        (.shared, "Shared", "person.crop.circle.badge.plus")
+    ]
+
+    private var activeSecondary: (Workspace.Mode, String, String)? {
+        secondaryModes.first { $0.0 == workspace.mode }
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(primaryModes, id: \.0) { mode, title, icon in
+                let isSelected = workspace.mode == mode
+                let isHovered = hoveredMode == mode && !isSelected
+
+                Button {
+                    workspace.mode = mode
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: icon)
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
+                            .foregroundStyle(
+                                isSelected ? Color.white :
+                                isHovered ? Color.white.opacity(0.95) :
+                                Color(white: 0.62)
+                            )
+                        Text(title)
+                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                            .foregroundStyle(
+                                isSelected ? Color.white :
+                                isHovered ? Color.white.opacity(0.95) :
+                                Color(white: 0.65)
+                            )
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(
+                        Group {
+                            if isSelected {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.white.opacity(0.22),
+                                                Color.white.opacity(0.12)
+                                            ],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(
+                                                LinearGradient(
+                                                    colors: [
+                                                        Color.white.opacity(0.35),
+                                                        Color.white.opacity(0.08)
+                                                    ],
+                                                    startPoint: .top,
+                                                    endPoint: .bottom
+                                                ),
+                                                lineWidth: 0.75
+                                            )
+                                    )
+                                    .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
+                            } else if isHovered {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.white.opacity(0.07))
+                            } else {
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.clear)
+                            }
+                        }
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    hoveredMode = hovering ? mode : nil
+                }
+            }
+
+            // Divider between core modes and More dropdown
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(width: 1, height: 14)
+                .padding(.horizontal, 1)
+
+            // More Dropdown Menu for secondary production tools
+            Menu {
+                ForEach(secondaryModes, id: \.0) { mode, title, icon in
+                    Button {
+                        workspace.mode = mode
+                    } label: {
+                        Label(title, systemImage: icon)
+                    }
+                }
+                Divider()
+                Button {
+                    workspace.showPulledOutShelf = true
+                } label: {
+                    Label("Pulled-Out Beats Shelf…", systemImage: "tray.full")
+                }
+            } label: {
+                let isSecondaryActive = activeSecondary != nil
+                HStack(spacing: 4) {
+                    if let active = activeSecondary {
+                        Image(systemName: active.2)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                        Text(active.1)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color.white)
+                    } else {
+                        Text("More")
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(Color(white: 0.65))
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(isSecondaryActive ? Color.white : Color(white: 0.55))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    Group {
+                        if isSecondaryActive {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color.white.opacity(0.22), Color.white.opacity(0.12)],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(
+                                            LinearGradient(
+                                                colors: [Color.white.opacity(0.35), Color.white.opacity(0.08)],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            ),
+                                            lineWidth: 0.75
+                                        )
+                                )
+                                .shadow(color: Color.black.opacity(0.3), radius: 2, x: 0, y: 1)
+                        } else {
+                            RoundedRectangle(cornerRadius: 6).fill(Color.clear)
+                        }
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(white: 0.11),
+                            Color(white: 0.08)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.white.opacity(0.09), lineWidth: 0.75)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 3, x: 0, y: 1)
+        .animation(.snappy(duration: 0.18), value: workspace.mode)
+        .animation(.easeOut(duration: 0.12), value: hoveredMode)
+    }
+}
+
+struct CompanyLogoView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let name = colorScheme == .light ? "logo_light_trimmed" : "logo_dark_trimmed"
+        if let url = Bundle.main.url(forResource: name, withExtension: "png") ?? Bundle.main.url(forResource: "logo_dark_trimmed", withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            Image(nsImage: img)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 18)
+                .padding(.horizontal, 4)
+                .help("DOT Screenplay")
+        } else {
+            HStack(spacing: 5) {
+                Circle().fill(Color.orange).frame(width: 7, height: 7)
+                Text("DOT")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
         }
     }
 }
@@ -553,10 +1288,37 @@ struct SceneWritingView: View {
     }
 }
 
+@MainActor
+func findField(_ identifier: String, in view: NSView) -> NSTextField? {
+    if let tf = view as? NSTextField, tf.identifier?.rawValue == identifier {
+        return tf
+    }
+    for sub in view.subviews {
+        if let match = findField(identifier, in: sub) {
+            return match
+        }
+    }
+    return nil
+}
+
+@MainActor
+func findScreenplayTextView(in view: NSView) -> ScreenplayTextView? {
+    if let tv = view as? ScreenplayTextView {
+        return tv
+    }
+    for sub in view.subviews {
+        if let match = findScreenplayTextView(in: sub) {
+            return match
+        }
+    }
+    return nil
+}
+
 struct ScriptSuggestionField: NSViewRepresentable {
     let label: String
     @Binding var text: String
     let options: [String]
+    var identifier: String? = nil
     @Environment(\.isEnabled) private var enabled
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSTextField {
@@ -564,10 +1326,12 @@ struct ScriptSuggestionField: NSViewRepresentable {
         field.placeholderString = label; field.setAccessibilityLabel(label)
         field.isBezeled = true; field.bezelStyle = .roundedBezel
         field.delegate = context.coordinator
+        if let identifier { field.identifier = NSUserInterfaceItemIdentifier(identifier) }
         return field
     }
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self; field.isEnabled = enabled
+        if let identifier { field.identifier = NSUserInterfaceItemIdentifier(identifier) }
         if field.currentEditor() == nil { field.stringValue = text.uppercased() }
     }
     final class Coordinator: NSObject, NSTextFieldDelegate {
@@ -591,6 +1355,36 @@ struct ScriptSuggestionField: NSViewRepresentable {
             let before = source.substring(to: range.location)
             index.pointee = -1
             return Array(Set(parent.options.map { $0.uppercased() })).sorted().filter { $0.lowercased().hasPrefix(prefix.lowercased()) && $0.lowercased() != prefix.lowercased() }.map { String($0.dropFirst(before.count)) }
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                guard let window = control.window, let content = window.contentView else { return false }
+                if parent.identifier == "beatPopupSluglinePrefix" {
+                    if let next = findField("beatPopupSluglineLocation", in: content) {
+                        window.makeFirstResponder(next)
+                        next.selectText(nil)
+                        return true
+                    }
+                } else if parent.identifier == "beatPopupSluglineLocation" {
+                    let timeField = findField("beatPopupSluglineTime", in: content)
+                    if let timeField, timeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        window.makeFirstResponder(timeField)
+                        timeField.selectText(nil)
+                        return true
+                    } else if let tv = findScreenplayTextView(in: content) {
+                        window.makeFirstResponder(tv)
+                        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+                        return true
+                    }
+                } else if parent.identifier == "beatPopupSluglineTime" {
+                    if let tv = findScreenplayTextView(in: content) {
+                        window.makeFirstResponder(tv)
+                        tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+                        return true
+                    }
+                }
+            }
+            return false
         }
     }
 }

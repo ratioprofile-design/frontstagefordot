@@ -110,6 +110,8 @@ struct StoryBoardView: View {
                     }.frame(width: 115)
                 }
                 Divider().frame(height: 18)
+                Button { showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
+                    .help("Toggle Inspector Panel")
                 Toggle("Ripple", isOn: $ripple).toggleStyle(.button).tint(.cyan)
                     .help("Preserve lane order and push downstream effects and overlapping beats.")
                 Toggle("Snap", isOn: $snap).toggleStyle(.button).tint(.purple)
@@ -129,8 +131,6 @@ struct StoryBoardView: View {
                     Divider()
                     Button("Apply Board Order to Screenplay") { workspace.edit("Apply Story Order") { try $0.applyStoryOrder(boardID: boardID) } }
                 } label: { Label("Story", systemImage: "plus") }
-                Button { showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
-                    .help("Beat details, causes, effects and issues")
                 Divider().frame(height: 18)
                 Button { zoom = max(0.3, zoom - 0.1) } label: { Image(systemName: "minus.magnifyingglass") }
                 Text("\(Int(zoom * 100))%").monospacedDigit().frame(width: 40)

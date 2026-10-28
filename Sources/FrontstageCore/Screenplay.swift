@@ -4,14 +4,16 @@ public enum ScreenplayElement: String, CaseIterable, Codable, Sendable {
     case action, character, dialogue, parenthetical, transition, shot, lyrics
     case sceneHeading = "slugline"
 
-    public static let editable: [Self] = [.action, .character, .dialogue, .parenthetical, .transition, .shot, .lyrics, .sceneHeading]
+    public static let ordered: [Self] = [.sceneHeading, .action, .character, .dialogue, .parenthetical, .transition, .shot, .lyrics]
+    public static let editable: [Self] = ordered
     public var label: String { self == .sceneHeading ? "Scene Heading" : rawValue.capitalized }
     public var keepsWithNext: Bool { [.sceneHeading, .character, .parenthetical].contains(self) }
 
     public func afterReturn(isEmpty: Bool) -> Self {
         switch self {
         case .character, .parenthetical: return .dialogue
-        case .dialogue: return .action
+        case .dialogue: return isEmpty ? .action : .character
+        case .transition: return .sceneHeading
         case .lyrics: return .lyrics
         default: return .action
         }

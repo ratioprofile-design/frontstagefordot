@@ -26,40 +26,83 @@ struct ScriptWritingWorkspace: View {
     private func matches(_ beat: BoardBeat) -> Bool { workspace.reader.filters.matches(beat, board: workspace.whiteboard, scenes: workspace.project.scenes) && (filter.isEmpty || ([beat.title, beat.synopsis, beat.html] + beat.characters + beat.tags).joined(separator: " ").localizedCaseInsensitiveContains(filter)) }
     private var tools: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
+                Button {
+                    workspace.toggleInspector()
+                } label: {
+                    Label("Inspector", systemImage: "sidebar.right")
+                }
+                .help("Toggle Inspector Panel")
                 Menu {
-                Menu("Display") {
-                    Picker("Beat Display", selection: $display) { ForEach(["Expand All", "Index Cards", "Collapse All", "Content Only", "Final Script"], id: \.self) { Text($0) } }
-                    Divider()
-                    Toggle("Show Characters", isOn: $showCharacters); Toggle("Show Tags", isOn: $showTags)
-                    Toggle("Show Omitted Preview", isOn: $showOmitted)
-                    Toggle("Show Synopsis", isOn: $showSynopsis); Toggle("Show Block/Group Beginnings", isOn: $showBoundaries)
-                    Picker("Margins", selection: $margin) { ForEach(["Full Margins", "Compact Margins", "Squeezed", "Super Squeezed"], id: \.self) { Text($0) } }
-                    Button("Zoom In") { zoom = min(2, zoom + 0.1) }; Button("Zoom Out") { zoom = max(0.5, zoom - 0.1) }; Button("100%") { zoom = 1 }
-                }
-                Menu("Styling") {
-                    ForEach(ScreenplayElement.editable, id: \.self) { element in Button(element.label) { activeController?.format(element) } }
-                    Divider()
-                    ForEach(["bold", "italic", "underline"], id: \.self) { style in Button(style.capitalized) { activeController?.toggleInlineStyle(style) } }
-                }
-                .disabled(activeController?.textView?.isEditable != true)
-                ScriptFilterMenu(workspace: workspace, state: $workspace.reader.filters).id(workspace.documentSessionID)
-                Menu("Presets") {
-                    Button("Reading") { display = "Final Script"; margin = "Full Margins"; zoom = 1; filter = "" }
-                    Button("Story Review") { display = "Expand All" }
-                    Button("Index Cards") { display = "Index Cards" }
-                }
-                Menu("Options") {
-                    Button("Full Screen") { NSApp.keyWindow?.toggleFullScreen(nil) }
-                    Button("Writing Settings") { workspace.mode = .writingTools }
-                }
+                    Menu("Display") {
+                        Picker("Beat Display", selection: $display) { ForEach(["Expand All", "Index Cards", "Collapse All", "Content Only", "Final Script"], id: \.self) { Text($0) } }
+                        Divider()
+                        Toggle("Show Characters", isOn: $showCharacters); Toggle("Show Tags", isOn: $showTags)
+                        Toggle("Show Omitted Preview", isOn: $showOmitted)
+                        Toggle("Show Synopsis", isOn: $showSynopsis); Toggle("Show Block/Group Beginnings", isOn: $showBoundaries)
+                        Picker("Margins", selection: $margin) { ForEach(["Full Margins", "Compact Margins", "Squeezed", "Super Squeezed"], id: \.self) { Text($0) } }
+                        Button("Zoom In") { zoom = min(2, zoom + 0.1) }; Button("Zoom Out") { zoom = max(0.5, zoom - 0.1) }; Button("100%") { zoom = 1 }
+                    }
+                    Menu("Styling") {
+                        ForEach(ScreenplayElement.editable, id: \.self) { element in Button(element.label) { activeController?.format(element) } }
+                        Divider()
+                        ForEach(["bold", "italic", "underline"], id: \.self) { style in Button(style.capitalized) { activeController?.toggleInlineStyle(style) } }
+                    }
+                    .disabled(activeController?.textView?.isEditable != true)
+                    ScriptFilterMenu(workspace: workspace, state: $workspace.reader.filters).id(workspace.documentSessionID)
+                    Menu("Presets") {
+                        Button("Reading") { display = "Final Script"; margin = "Full Margins"; zoom = 1; filter = "" }
+                        Button("Story Review") { display = "Expand All" }
+                        Button("Index Cards") { display = "Index Cards" }
+                    }
+                    Menu("Options") {
+                        Button("Full Screen") { NSApp.keyWindow?.toggleFullScreen(nil) }
+                        Button("Writing Settings") { workspace.mode = .writingTools }
+                    }
                 } label: { Label("Writing options", systemImage: "ellipsis.circle") }
                 Button("Zoom out", systemImage: "minus.magnifyingglass") { zoom = max(0.5, zoom - 0.1) }.labelStyle(.iconOnly)
                 Text("\(Int((zoom * 100).rounded()))%")
                 Button("Zoom in", systemImage: "plus.magnifyingglass") { zoom = min(2, zoom + 0.1) }.labelStyle(.iconOnly)
                 Picker("Paper theme", selection: $paperTheme) { ForEach(WritingPaperTheme.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) } }.labelsHidden().frame(width: 85)
-                Spacer()
-                Button("Toggle inspector", systemImage: "sidebar.right") { workspace.writeInspectorToggle += 1 }.labelStyle(.iconOnly)
+                if let rev = workspace.project.currentRevision {
+                    Button {
+                        workspace.mode = .writingTools
+                    } label: {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(rev.color.swiftUIColor)
+                                .frame(width: 8, height: 8)
+                            Text(rev.label.uppercased())
+                                .font(.system(size: 10, weight: .bold))
+                            if rev.isLocked {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 8))
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.white.opacity(0.15)))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Production Revision: \(rev.label) (\(rev.isLocked ? "Locked" : "Unlocked")). Click to configure.")
+                } else {
+                    Button {
+                        workspace.mode = .writingTools
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "lock.open")
+                                .font(.system(size: 9))
+                            Text("Spec Draft")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Script is in unlocked Spec Draft mode. Click to start production revisions.")
+                }
             }.font(.caption).padding(10).fixedSize()
         }.frame(height: 40).background(Color(white: 0.2)).accessibilityIdentifier("dedicated-script-tools")
     }
@@ -75,11 +118,7 @@ struct ScriptWritingWorkspace: View {
         }) {
         VStack(spacing: 0) {
             tools
-            ScrollView(.horizontal, showsIndicators: false) { HStack {
-                ForEach([ScreenplayElement.sceneHeading] + ScreenplayElement.editable.filter { $0 != .sceneHeading }, id: \.self) { element in
-                    Button(element.label) { (plain ? workspace.scriptController("write-continuous") : activeController)?.format(element) }
-                }
-            }.padding(6) }.frame(height: 38)
+            WriterElementBar(controller: plain ? workspace.scriptController("write-continuous") : (activeController ?? workspace.editor))
             if showOmitted {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
@@ -286,6 +325,68 @@ struct SideScriptBeat: View {
     }
 }
 
+struct ScreenplayTitleBanner: View {
+    @ObservedObject var workspace: Workspace
+    @FocusState private var isFocused: Bool
+    @State private var isHovered = false
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            TextField("Untitled Screenplay", text: Binding(
+                get: { workspace.project.name },
+                set: { newName in
+                    workspace.edit("Rename Screenplay", key: "project-name") {
+                        $0.name = newName
+                    }
+                }
+            ))
+            .textFieldStyle(.plain)
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .focused($isFocused)
+            .onSubmit {
+                commitTitle()
+                isFocused = false
+            }
+            .frame(maxWidth: .infinity)
+
+            if isHovered && !isFocused {
+                Image(systemName: "pencil")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.trailing, 4)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .background(Color(boardHex: "#078827"))
+        .clipShape(RoundedRectangle(cornerRadius: 3))
+        .overlay(
+            RoundedRectangle(cornerRadius: 3)
+                .stroke(isFocused ? Color.white.opacity(0.8) : (isHovered ? Color.white.opacity(0.3) : Color.clear), lineWidth: 1.5)
+        )
+        .onHover { isHovered = $0 }
+        .onChange(of: isFocused) { focused in
+            if !focused {
+                commitTitle()
+            }
+        }
+        .help("Click to rename screenplay")
+        .accessibilityIdentifier("screenplay-title-banner")
+    }
+
+    private func commitTitle() {
+        let trimmed = workspace.project.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            workspace.edit("Rename Screenplay", key: "project-name") {
+                $0.name = "Untitled Screenplay"
+            }
+        }
+    }
+}
+
 struct ScriptSidePaper: View {
     @ObservedObject var workspace: Workspace
     private func display(_ mode: String) { workspace.reader.display = mode; workspace.reader.revision += 1 }
@@ -295,40 +396,88 @@ struct ScriptSidePaper: View {
         return workspace.reader.filters.matches(beat, board: workspace.whiteboard, scenes: workspace.project.scenes) && (query.isEmpty || ([beat.title, beat.synopsis, beat.html] + beat.characters + beat.tags).joined(separator: " ").localizedCaseInsensitiveContains(query))
     }
     private var tools: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             Menu {
-                Section("Beat Display") { ForEach(["Expand All", "Index Cards", "Collapse All", "Content Only", "Final Script"], id: \.self) { mode in Button(mode) { display(mode) } } }
-                Section("Beat Details") {
+                Menu("Display Mode") {
+                    ForEach(["Expand All", "Index Cards", "Collapse All", "Content Only", "Final Script"], id: \.self) { mode in
+                        Button(mode) { display(mode) }
+                    }
+                }
+                Menu("Beat Details") {
                     Toggle("Show Characters", isOn: $workspace.reader.characters)
                     Toggle("Show Tags", isOn: $workspace.reader.tags)
                     Toggle("Show Synopsis Field", isOn: $workspace.reader.synopsis)
                     Toggle("Show Block/Group Beginnings", isOn: $workspace.reader.boundaries)
                 }
-                Section("Display Margins") { Picker("Margins", selection: $workspace.reader.margins) { ForEach(["Full Margins", "Compact Margins", "Squeezed", "Super Squeezed"], id: \.self) { Text($0) } } }
-            } label: { Label("Display", systemImage: "rectangle.split.3x1") }
-            Menu {
-                Button("Zoom In") { workspace.reader.zoom = min(2, workspace.reader.zoom + 0.1) }
-                Button("Zoom Out") { workspace.reader.zoom = max(0.7, workspace.reader.zoom - 0.1) }
-                Button("100%") { workspace.reader.zoom = 1 }
-            } label: { Label("Styling", systemImage: "textformat") }
-            ScriptFilterMenu(workspace: workspace, state: $workspace.reader.filters).id(workspace.documentSessionID)
-            Menu {
-                Button("Story Review") { workspace.reader = ScriptReaderSettings() }
-                Button("Reading") { display("Final Script"); workspace.reader.zoom = 1.1 }
-                Button("Index Cards") { display("Index Cards"); workspace.reader.synopsis = true }
-            } label: { Label("Presets", systemImage: "eye") }
-            Menu {
+                Menu("Margins") {
+                    ForEach(["Full Margins", "Compact Margins", "Squeezed", "Super Squeezed"], id: \.self) { m in
+                        Button(m) { workspace.reader.margins = m }
+                    }
+                }
+                Divider()
+                Menu("Styling & Zoom") {
+                    Button("Zoom In") { workspace.reader.zoom = min(2, workspace.reader.zoom + 0.1) }
+                    Button("Zoom Out") { workspace.reader.zoom = max(0.7, workspace.reader.zoom - 0.1) }
+                    Button("Reset Zoom (100%)") { workspace.reader.zoom = 1 }
+                }
+                ScriptFilterMenu(workspace: workspace, state: $workspace.reader.filters).id(workspace.documentSessionID)
+                Menu("Presets") {
+                    Button("Story Review") { workspace.reader = ScriptReaderSettings() }
+                    Button("Reading") { display("Final Script"); workspace.reader.zoom = 1.1 }
+                    Button("Index Cards") { display("Index Cards"); workspace.reader.synopsis = true }
+                }
+                Divider()
                 Toggle("Follow Selected Beat", isOn: $workspace.reader.followSelection)
                 Button("Full Screen") { NSApp.keyWindow?.toggleFullScreen(nil) }
-            } label: { Label("Options", systemImage: "gearshape") }
-        }.labelStyle(.titleAndIcon).font(.system(size: 11)).fixedSize(horizontal: true, vertical: false).padding(8)
-        }.frame(height: 44).background(Color(white: 0.2)).accessibilityIdentifier("script-reader-tools")
+                Divider()
+                Button("Script Typography Preferences…") { workspace.showPreferences = true }
+            } label: {
+                Label("View Options", systemImage: "slider.horizontal.3")
+            }
+            .menuStyle(.borderedButton)
+            .fixedSize()
+
+            Spacer()
+
+            Text("\(segments.count) scenes")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(height: 38)
+        .background(Color(white: 0.18))
+        .accessibilityIdentifier("script-reader-tools")
     }
     var body: some View {
         VStack(spacing: 0) {
             tools.frame(maxWidth: .infinity, alignment: .leading)
             TextField("Filter script, characters or tags", text: $workspace.reader.filter).textFieldStyle(.roundedBorder).padding(6)
+            if !workspace.project.pulledOutBeats.isEmpty {
+                Button {
+                    workspace.showPulledOutShelf = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "tray.full.fill").foregroundStyle(.orange)
+                        Text("Pulled Out Beats (\(workspace.project.pulledOutBeats.count))")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("Restore")
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange.opacity(0.25)))
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.3), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 2)
+            }
             if let id = workspace.selectedBoardBeatID, let beat = workspace.whiteboard.beats.first(where: { $0.id == id }), !matches(beat) {
                 HStack { Text("Selected beat is hidden by filters.").font(.caption); Button("Reveal selected beat") { workspace.reader.filters = .init(); workspace.reader.filter = "" } }.padding(6)
             }
@@ -336,7 +485,7 @@ struct ScriptSidePaper: View {
                 ScrollViewReader { proxy in
                     ScrollView(.vertical) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(workspace.project.name).font(.system(size: 17)).foregroundStyle(.white).frame(maxWidth: .infinity).padding(14).background(Color(boardHex: "#078827"))
+                            ScreenplayTitleBanner(workspace: workspace)
                             ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                                 let beats = segment.beatIDs.compactMap { id in workspace.whiteboard.beats.first { $0.id == id } }.filter(matches)
                                 if !beats.isEmpty || (segment.beatIDs.isEmpty && workspace.reader.filter.isEmpty) {
@@ -370,6 +519,89 @@ struct InlineFormatButtons: View {
             Button("B") { controller.toggleInlineStyle("bold") }.fontWeight(.bold).accessibilityLabel("Bold")
             Button("I") { controller.toggleInlineStyle("italic") }.italic().accessibilityLabel("Italic")
             Button("U") { controller.toggleInlineStyle("underline") }.accessibilityLabel("Underline")
+        }
+    }
+}
+
+private struct WriterElementBar: View {
+    @ObservedObject var controller: ScreenplayEditorController
+
+    private let elements: [ScreenplayElement] = ScreenplayElement.ordered
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(Array(elements.enumerated()), id: \.element) { index, element in
+                    let isSelected = controller.activeElement == element
+                    let num = index + 1
+                    Button {
+                        controller.format(element)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("\(num)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(isSelected ? Color.white : Color(white: 0.55))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(isSelected ? Color.white.opacity(0.25) : Color.white.opacity(0.08))
+                                )
+                            Text(element.label)
+                                .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                                .foregroundStyle(isSelected ? Color.white : Color(white: 0.78))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(isSelected ? Color(red: 0.18, green: 0.48, blue: 0.92) : Color(white: 0.22))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .stroke(isSelected ? Color.white.opacity(0.7) : Color.white.opacity(0.12), lineWidth: isSelected ? 1.5 : 0.5)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("writer-element-\(element.rawValue)")
+                    .help("\(element.label) (⌘\(num))")
+                }
+
+                Divider()
+                    .frame(height: 18)
+                    .padding(.horizontal, 4)
+
+                Button {
+                    controller.toggleDualDialogue()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "rectangle.split.2x1")
+                            .font(.system(size: 11))
+                        Text("Dual Dialogue")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Color(white: 0.85))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(Color(white: 0.22))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Dual Dialogue for current speech block (⌘⇧D)")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+        }
+        .frame(height: 38)
+        .background(Color(white: 0.16))
+        .overlay(alignment: .bottom) {
+            Divider()
         }
     }
 }

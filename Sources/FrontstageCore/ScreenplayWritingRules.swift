@@ -6,12 +6,46 @@ public struct ScreenplayCommand: Equatable, Sendable {
     public let placement: ScreenplayCommandPlacement
     public init(element: ScreenplayElement, placement: ScreenplayCommandPlacement) { self.element = element; self.placement = placement }
     public static func resolve(element: ScreenplayElement, key: String, empty: Bool, selection: Bool = false) -> Self {
+        if key == "CmdEnter" || key == "CtrlEnter" {
+            return Self(element: .action, placement: .afterParagraph)
+        }
         if key == "Backtab" { return Self(element: element.cycled(backward: true), placement: .inPlace) }
-        if element == .sceneHeading { return Self(element: .action, placement: .body) }
+        if element == .sceneHeading && key == "Enter" { return Self(element: .action, placement: .body) }
         if key == "Tab" {
-            if element == .character { return Self(element: .character, placement: .suggestions) }
-            let next: ScreenplayElement = element == .dialogue ? .parenthetical : element == .parenthetical ? .dialogue : .character
-            return Self(element: next, placement: empty || selection ? .inPlace : .afterParagraph)
+            switch element {
+            case .action:
+                return Self(element: .character, placement: .inPlace)
+            case .character:
+                return Self(element: .transition, placement: .inPlace)
+            case .transition:
+                return Self(element: .action, placement: .inPlace)
+            case .dialogue:
+                return Self(element: .parenthetical, placement: .inPlace)
+            case .parenthetical:
+                return Self(element: .dialogue, placement: .inPlace)
+            default:
+                return Self(element: .character, placement: .inPlace)
+            }
+        }
+        if key == "Enter" {
+            switch element {
+            case .sceneHeading:
+                return Self(element: .action, placement: .body)
+            case .action:
+                return Self(element: .action, placement: .split)
+            case .character:
+                return Self(element: empty ? .action : .dialogue, placement: empty ? .inPlace : .afterParagraph)
+            case .dialogue:
+                return Self(element: empty ? .action : .character, placement: empty ? .inPlace : .afterParagraph)
+            case .parenthetical:
+                return Self(element: empty ? .action : .dialogue, placement: empty ? .inPlace : .afterParagraph)
+            case .transition:
+                return Self(element: .sceneHeading, placement: .afterParagraph)
+            case .shot:
+                return Self(element: .action, placement: .afterParagraph)
+            case .lyrics:
+                return Self(element: .lyrics, placement: .split)
+            }
         }
         let next: ScreenplayElement = element == .character && empty ? .action : element.afterReturn(isEmpty: empty)
         let placement: ScreenplayCommandPlacement = empty && element != .action && element != .lyrics ? .inPlace : [.character, .parenthetical, .transition, .shot].contains(element) ? .afterParagraph : .split
@@ -24,7 +58,16 @@ public struct CharacterCue: Equatable, Sendable {
     public let extensions: [String]
     public var hasContinuation: Bool { extensions.contains { Self.isContinuation($0) } }
     public var withoutContinuation: String { ([name] + extensions.filter { !Self.isContinuation($0) }).joined(separator: " ") }
-    public static let voiceExtensions = ["(V.O.)", "(O.S.)", "(O.C.)", "(CONT'D)"]
+    public static let voiceExtensions = [
+        "(V.O.)",
+        "(O.S.)",
+        "(O.C.)",
+        "(CONT'D)",
+        "(INTO PHONE)",
+        "(OVER PHONE)",
+        "(PRE-LAP)",
+        "(FILTERED)"
+    ]
     public static let deliveryNotes = ["(beat)", "(quietly)", "(over the phone)", "(whispering)", "(to himself)", "(to herself)", "(into phone)"]
     public static func normalized(_ text: String) -> String {
         text.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()

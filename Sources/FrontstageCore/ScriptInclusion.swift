@@ -109,6 +109,11 @@ extension Project {
         try candidate.storeWhiteboard(board)
         self = candidate
     }
+    public mutating func deletePulledOutBeats(_ ids: Set<String>) throws {
+        var archive = state["frontstagePullouts"]?.array ?? []
+        archive.removeAll { ids.contains($0.object?["id"]?.string ?? "") }
+        state["frontstagePullouts"] = .array(archive)
+    }
 }
 
 extension Project {

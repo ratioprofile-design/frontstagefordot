@@ -12,6 +12,7 @@ struct WritingToolsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Writing Tools").font(.title2)
+                ProductionRevisionPanel(workspace: workspace)
                 if let scene = workspace.selectedScene {
                     GroupBox("Scene script") {
                         VStack(alignment: .leading) {
@@ -22,7 +23,7 @@ struct WritingToolsView: View {
                     }
                 }
                 GroupBox("Screenplay typography") {
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 10) {
                         TextField("Font name", text: Binding(get: { layout.fontName }, set: { name in changeLayout { $0.fontName = name } }))
                         HStack {
                             Text("Font size")
@@ -30,6 +31,10 @@ struct WritingToolsView: View {
                             Text("Line height")
                             TextField("Height", value: Binding(get: { layout.lineHeight }, set: { value in changeLayout { $0.lineHeight = value } }), format: .number)
                         }
+                        Button("Manage Typography in Preferences…") {
+                            workspace.showPreferences = true
+                        }
+                        .buttonStyle(.borderedProminent)
                     }.padding(8)
                 }
                 GroupBox("Bamini → Unicode Tamil") {
@@ -80,6 +85,153 @@ struct WritingToolsView: View {
             let result = try ParallelScriptPDF.render(rows: rows, title: workspace.selectedScene?.title ?? "Parallel Script", paper: workspace.paper)
             try workspace.exportPDF(result, name: "Two-column Script")
         } catch { workspace.errorMessage = error.localizedDescription }
+    }
+}
+
+struct ProductionRevisionPanel: View {
+    @ObservedObject var workspace: Workspace
+
+    private var currentRevision: ProductionRevision? {
+        workspace.project.currentRevision
+    }
+
+    var body: some View {
+        GroupBox("Production Revisions & Page Locking") {
+            VStack(alignment: .leading, spacing: 12) {
+                if let rev = currentRevision {
+                    HStack(spacing: 12) {
+                        Circle()
+                            .fill(colorFor(rev.color))
+                            .frame(width: 14, height: 14)
+                            .overlay(Circle().stroke(Color.white.opacity(0.4), lineWidth: 1))
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(rev.label)
+                                .font(.headline)
+                            Text("\(rev.color.rawValue) Revision • \(formattedDate(rev.date))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        if rev.isLocked {
+                            Label("Production Locked", systemImage: "lock.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.accentColor.opacity(0.15))
+                                .cornerRadius(6)
+                        } else {
+                            Label("Unlocked Draft", systemImage: "lock.open")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    
+                    Divider()
+
+                    Toggle("Lock Production Pages", isOn: Binding(
+                        get: { rev.isLocked },
+                        set: { _ in
+                            workspace.edit("Toggle Production Lock") {
+                                $0.toggleProductionLock()
+                            }
+                        }
+                    ))
+                    .help("When locked, any edits made will be flagged with revision asterisks (*) in the right margin on PDF export.")
+
+                    HStack(spacing: 10) {
+                        Button {
+                            workspace.edit("Advance Revision Color") {
+                                $0.startNextRevision()
+                            }
+                        } label: {
+                            Label(nextRevisionButtonTitle(rev.color), systemImage: "arrow.right.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .help("Advance to the next industry production color and create a new change baseline.")
+
+                        Menu {
+                            ForEach(RevisionColor.allCases, id: \.self) { color in
+                                Button {
+                                    workspace.edit("Set Revision Color") {
+                                        $0.setRevisionColor(color)
+                                    }
+                                } label: {
+                                    HStack {
+                                        Text(color.rawValue)
+                                        if color == rev.color {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                            Divider()
+                            Button("Reset to Spec Draft (Clear Revisions)", role: .destructive) {
+                                workspace.edit("Clear Revisions") {
+                                    $0.clearProductionRevision()
+                                }
+                            }
+                        } label: {
+                            Label("Change Color…", systemImage: "paintpalette")
+                        }
+                    }
+
+                    if rev.isLocked {
+                        Text("Edits to scenes are compared against the baseline. Lines modified since locking will display an asterisk (*) in the PDF margin and include the revision header \(rev.headerString).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Script is currently in Spec Draft mode. Production revisions track changes by color (White, Blue, Pink, Yellow, Green, Goldenrod, Buff, Salmon, Cherry) and stamp asterisks (*) next to revised lines.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            workspace.edit("Start Production Revisions") {
+                                $0.toggleProductionLock()
+                            }
+                        } label: {
+                            Label("Lock Script & Start Production Draft (White)", systemImage: "lock.badge.clock")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .padding(8)
+        }
+    }
+
+    private func colorFor(_ revColor: RevisionColor) -> Color {
+        switch revColor {
+        case .white: return Color.white
+        case .blue: return Color(red: 0.29, green: 0.56, blue: 0.89)
+        case .pink: return Color(red: 0.89, green: 0.35, blue: 0.60)
+        case .yellow: return Color(red: 0.96, green: 0.65, blue: 0.14)
+        case .green: return Color(red: 0.49, green: 0.83, blue: 0.13)
+        case .goldenrod: return Color(red: 0.82, green: 0.55, blue: 0.16)
+        case .buff: return Color(red: 0.91, green: 0.85, blue: 0.65)
+        case .salmon: return Color(red: 0.98, green: 0.50, blue: 0.45)
+        case .cherry: return Color(red: 0.87, green: 0.19, blue: 0.39)
+        case .secondWhite: return Color(red: 0.94, green: 0.94, blue: 0.94)
+        }
+    }
+
+    private func nextRevisionButtonTitle(_ current: RevisionColor) -> String {
+        if let next = current.next {
+            return "Start \(next.rawValue) Revision"
+        } else {
+            return "Start 2nd White Revision"
+        }
+    }
+
+    private func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 }
 

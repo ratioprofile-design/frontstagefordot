@@ -4,9 +4,55 @@ import SwiftUI
 import FrontstageCore
 
 @MainActor
-private final class BeatEditorPanel: NSPanel {
+final class BeatEditorPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    func focusSlugline() {
+        guard let content = contentView else { return }
+        let prefixField = findField("beatPopupSluglinePrefix", in: content)
+        let locationField = findField("beatPopupSluglineLocation", in: content)
+        let isLocationFocused = firstResponder === locationField || (firstResponder as? NSText)?.delegate === locationField
+        let target: NSTextField?
+        if isLocationFocused {
+            target = prefixField ?? locationField
+        } else {
+            if let p = prefixField, p.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                target = p
+            } else {
+                target = locationField ?? prefixField
+            }
+        }
+        if let target {
+            makeFirstResponder(target)
+            target.selectText(nil)
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command),
+           !event.modifierFlags.contains(.shift),
+           !event.modifierFlags.contains(.control),
+           !event.modifierFlags.contains(.option),
+           event.charactersIgnoringModifiers == "1" {
+            focusSlugline()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown, event.keyCode == 53 { close(); return }
+        if event.type == .keyDown {
+            if event.keyCode == 53 { close(); return }
+            if event.modifierFlags.contains(.command),
+               !event.modifierFlags.contains(.shift),
+               !event.modifierFlags.contains(.control),
+               !event.modifierFlags.contains(.option),
+               event.charactersIgnoringModifiers == "1" {
+                focusSlugline()
+                return
+            }
+        }
         super.sendEvent(event)
     }
 }
@@ -49,13 +95,19 @@ final class BeatPopupPresenter: NSObject, NSWindowDelegate {
         let editor = ScreenplayEditorController()
         let panel = BeatEditorPanel(contentRect: NSRect(x: 0, y: 0, width: WorkspaceDesign.popupWidth, height: WorkspaceDesign.popupHeight),
             styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+        editor.onSceneHeadingRequested = { [weak panel] in
+            panel?.focusSlugline()
+        }
         panel.title = "Edit Beat"
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 640, height: 440)
         panel.delegate = self
-        panel.contentView = NSHostingView(rootView: BeatPopupView(workspace: workspace, beatID: id, controller: editor, dismiss: { [weak self] in self?.close(id) }).preferredColorScheme(.dark))
+        let hosting = NSHostingView(rootView: BeatPopupView(workspace: workspace, beatID: id, controller: editor, dismiss: { [weak self] in self?.close(id) }).preferredColorScheme(.dark))
+        hosting.wantsLayer = true
+        hosting.layer?.cornerRadius = 5
+        panel.contentView = hosting
         let screen = NSScreen.screens.first { screen in anchor.map { screen.frame.intersects($0) } ?? false } ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
         var point = anchor.map { NSPoint(x: $0.maxX + 12, y: $0.maxY - panel.frame.height) }
@@ -90,12 +142,14 @@ final class BeatPopupPresenter: NSObject, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         guard let window = notification.object as? NSPanel, let id = panels.first(where: { $0.value === window })?.key else { return }
         panel = window; beatID = id; controller = controllers[id]
+        controller?.selectionChanged()
     }
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSPanel, let id = panels.first(where: { $0.value === window })?.key else { return }
         panels.removeValue(forKey: id); controllers.removeValue(forKey: id)
         window.contentView = nil
         if beatID == id { panel = nil; beatID = nil; controller = nil }
+        TamilInputManager.restoreStandardInput()
     }
 }
 
@@ -158,18 +212,41 @@ struct BeatPopupView: View {
                     ForEach(workspace.project.revisions(for: scene.id)) { version in Text(version.label).tag(version.id) }
                 }.labelsHidden()
                 Button("Save Version") { let label = "Version \(workspace.project.revisions(for: scene.id).count + 1)"; workspace.edit("Save Scene Version") { _ = try $0.saveRevision(sceneID: scene.id, label: label) } }
-                Picker("Action", selection: Binding(get: { controller.activeElement }, set: { controller.format($0) })) { ForEach(ScreenplayElement.editable, id: \.self) { Text($0.label).tag($0) } }.labelsHidden().frame(width: 120)
+                Picker("Action", selection: Binding(get: { controller.activeElement }, set: { elem in
+                    if elem == .sceneHeading {
+                        controller.onSceneHeadingRequested?()
+                    } else {
+                        controller.format(elem)
+                    }
+                })) { ForEach(ScreenplayElement.editable, id: \.self) { Text($0.label).tag($0) } }.labelsHidden().frame(width: 120)
                 Button("⋯") { showTools.toggle() }.accessibilityLabel("Formatting options")
             }
             if showTools { HStack { InlineFormatButtons(controller: controller); ScreenplaySuggestions(workspace: workspace, controller: controller) } }
             HStack {
                 Text("Location").frame(width: 80, alignment: .leading)
-                ScriptSuggestionField(label: "INT. / EXT.", text: heading(\.prefix), options: ["INT.","EXT.","INT./EXT."]).frame(width: 85)
-                ScriptSuggestionField(label: "Location", text: heading(\.location), options: Array(Set(workspace.project.scenes.map { $0.heading.location })).sorted())
-                ScriptSuggestionField(label: "DAY / NIGHT", text: heading(\.time), options: ["DAY","NIGHT","MORNING","EVENING","DAWN","DUSK","CONTINUOUS","LATER"]).frame(width: 180)
+                ScriptSuggestionField(label: "INT. / EXT.", text: heading(\.prefix), options: ["INT.","EXT.","INT./EXT."], identifier: "beatPopupSluglinePrefix").frame(width: 85)
+                ScriptSuggestionField(label: "Location", text: heading(\.location), options: Array(Set(workspace.project.scenes.map { $0.heading.location })).sorted(), identifier: "beatPopupSluglineLocation")
+                ScriptSuggestionField(label: "DAY / NIGHT", text: heading(\.time), options: ["DAY","NIGHT","MORNING","EVENING","DAWN","DUSK","CONTINUOUS","LATER"], identifier: "beatPopupSluglineTime").frame(width: 180)
             }
         }
     }
+    private var popupTypography: ScriptLayoutSettings {
+        var layout = workspace.project.scriptLayout
+        let targetSize = max(15.0, layout.fontSize * 1.25)
+        let scale = targetSize / max(1.0, layout.fontSize)
+        layout.fontSize = targetSize
+        layout.lineHeight = max(targetSize * 1.35, layout.lineHeight * scale)
+        layout.paragraphSpacing = max(10.0, layout.paragraphSpacing * scale)
+        for (key, elem) in layout.elements {
+            var updated = elem
+            if let customSize = elem.fontSize {
+                updated.fontSize = max(15.0, customSize * scale)
+            }
+            layout.elements[key] = updated
+        }
+        return layout
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             if let beat {
@@ -178,10 +255,10 @@ struct BeatPopupView: View {
                     .buttonStyle(.plain).background(Color(white: 0.13))
                 if scriptExpanded {
                     scriptControls.disabled(scene?.isTextLocked == true)
-                    ScreenplayEditor(html: text(\.html, label: "Snippet Text"), controller: controller, width: 532, typography: workspace.project.scriptLayout,
+                    ScreenplayEditor(html: text(\.html, label: "Snippet Text"), controller: controller, width: 532, typography: popupTypography,
                         onError: { workspace.errorMessage = $0 }, editable: scene?.isTextLocked != true, paper: true, paperTopInset: 16, suggestions: workspace.screenplayCompletions,
                         continuationSeed: DialoguePresentation.seed(project: workspace.project, beatID: beatID), explicitCharacters: workspace.project.characters.map(\.name) + workspace.whiteboard.beats.flatMap(\.characters)).id(beatID)
-                        .frame(maxWidth: .infinity, minHeight: 220).environment(\.colorScheme, .light)
+                        .frame(maxWidth: .infinity, minHeight: 280).environment(\.colorScheme, .light)
                 }
                 HStack {
                     Picker("Type", selection: Binding(get: { beat.kind }, set: { value in workspace.edit("Beat Type") { try $0.updateBoardBeat(beatID) { $0.kind = value } } })) { Text("Story Beat").tag(BoardBeatKind.story); Text("Subtext Beat").tag(BoardBeatKind.subtext) }.frame(width: 180)

@@ -25,36 +25,74 @@ struct WhiteboardWorkspace: View {
     private var timelineEnd: Double { max(20, board.beats.map { $0.start + $0.duration }.max() ?? 20, (markers.last?.x ?? 0) / StorySequencer.pointsPerPage + 3) }
 
     var body: some View {
-        GeometryReader { viewport in
         VStack(spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) { HStack(spacing: 12) {
-                Text(workspace.project.name).font(.caption.weight(.semibold))
-                Spacer()
-                Button { changeZoom(0.8) } label: { Image(systemName: "minus.magnifyingglass") }.accessibilityLabel("Zoom whiteboard out").help("Zoom whiteboard out")
-                Button("\(Int((board.viewport.zoom * 100).rounded()))%") { changeZoom(1 / board.viewport.zoom) }.accessibilityLabel("Reset whiteboard zoom").help("Reset whiteboard zoom to 100%")
-                Button { changeZoom(1.25) } label: { Image(systemName: "plus.magnifyingglass") }.accessibilityLabel("Zoom whiteboard in").help("Zoom whiteboard in")
-                Toggle("Script", isOn: $workspace.showBoardScript).toggleStyle(.button)
-                Toggle("Timeline", isOn: $showTimeline).toggleStyle(.button)
-                Toggle("Properties", isOn: $showProperties).toggleStyle(.button)
-            }.font(.caption).buttonStyle(.borderless).padding(.horizontal, 10).padding(.vertical, 5).fixedSize(horizontal: true, vertical: false) }.frame(height: 32)
-                .background(Color(white: 0.24))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    TextField("Untitled Screenplay", text: Binding(
+                        get: { workspace.project.name },
+                        set: { newName in
+                            workspace.edit("Rename Screenplay", key: "project-name") {
+                                $0.name = newName
+                            }
+                        }
+                    ))
+                    .textFieldStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 90)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .onSubmit {
+                        let trimmed = workspace.project.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty {
+                            workspace.edit("Rename Screenplay", key: "project-name") {
+                                $0.name = "Untitled Screenplay"
+                            }
+                        }
+                    }
+                    .help("Click to rename screenplay")
+                    Toggle("Script", isOn: $workspace.showBoardScript).toggleStyle(.button)
+                    Toggle("Inspector", isOn: $workspace.showInspector).toggleStyle(.button)
+                    Toggle("Timeline", isOn: $showTimeline).toggleStyle(.button)
+                    Button { fitRequest += 1 } label: { Label("Fit All", systemImage: "arrow.up.left.and.arrow.down.right") }
+                        .help("Fit all beats in view")
+                    Spacer()
+                    Button { changeZoom(0.8) } label: { Image(systemName: "minus.magnifyingglass") }.accessibilityLabel("Zoom whiteboard out").help("Zoom whiteboard out")
+                    Button("\(Int((board.viewport.zoom * 100).rounded()))%") { changeZoom(1 / board.viewport.zoom) }.accessibilityLabel("Reset whiteboard zoom").help("Reset whiteboard zoom to 100%")
+                    Button { changeZoom(1.25) } label: { Image(systemName: "plus.magnifyingglass") }.accessibilityLabel("Zoom whiteboard in").help("Zoom whiteboard in")
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .fixedSize(horizontal: true, vertical: false)
+            }
+            .frame(height: 32)
+            .background(Color(white: 0.24))
+
             HSplitView {
                 VStack(spacing: 0) {
-                    if showTimeline && !workspace.timelineDetached { StoryTimelineView(workspace: workspace, expanded: $expandedTimeline).frame(minHeight: expandedTimeline ? 250 : 210, maxHeight: expandedTimeline ? .infinity : 210) }
+                    if showTimeline && !workspace.timelineDetached {
+                        StoryTimelineView(workspace: workspace, expanded: $expandedTimeline)
+                            .frame(minHeight: expandedTimeline ? 250 : 210, maxHeight: expandedTimeline ? .infinity : 210)
+                    }
                     if let cause = workspace.pendingBoardCauseID {
                         HStack {
                             Text("Choose an effect for “\(board.beats.first { $0.id == cause }?.title ?? "Cause")”")
                             Spacer(); Button("Cancel") { workspace.pendingBoardCauseID = nil }
                         }.font(.caption).padding(6).background(.cyan.opacity(0.18))
                     }
-                    if !expandedTimeline || workspace.timelineDetached { WhiteboardCanvas(workspace: workspace, selection: $selection, blockSelection: $blockSelection, pushing: pushing, drawing: drawing, fitRequest: fitRequest)
-                        .frame(minHeight: 100, maxHeight: .infinity) }
-                }.frame(minWidth: 240, maxWidth: .infinity, maxHeight: .infinity)
-                    .safeAreaInset(edge: .bottom, spacing: 0) { if !expandedTimeline || workspace.timelineDetached { bottomTools } }
-                if showProperties && !expandedTimeline { properties.frame(minWidth: 210, idealWidth: 240, maxWidth: 300) }
+                    if !expandedTimeline || workspace.timelineDetached {
+                        WhiteboardCanvas(workspace: workspace, selection: $selection, blockSelection: $blockSelection, pushing: pushing, drawing: drawing, fitRequest: fitRequest)
+                            .frame(minHeight: 100, maxHeight: .infinity)
+                        bottomTools
+                    }
+                }
+                .frame(minWidth: 240, maxWidth: .infinity, maxHeight: .infinity)
+
+                if workspace.showInspector && !expandedTimeline {
+                    properties.frame(minWidth: 210, idealWidth: 240, maxWidth: 300)
+                }
             }
-        }
-        .frame(width: viewport.size.width, height: viewport.size.height, alignment: .topLeading)
         }
         .environment(\.colorScheme, .dark)
         .sheet(isPresented: $showMarkerEditor) { markerEditor }
@@ -75,46 +113,59 @@ struct WhiteboardWorkspace: View {
     }
 
     private var bottomTools: some View {
-        ScrollView(.horizontal, showsIndicators: true) {
-        HStack(spacing: 12) {
-            Button { drawing = false } label: { Image(systemName: "cursorarrow") }.tint(drawing ? .gray : .cyan)
-            Button { drawing.toggle() } label: { Image(systemName: "pencil.tip") }.tint(drawing ? .cyan : .gray)
-                .help("Draw board annotations")
-            Button { fitRequest += 1 } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("Fit selection or board")
-            Toggle("Push", isOn: $pushing).toggleStyle(.button).help("Push space open or closed; also Command-drag on the board")
-            Toggle("Ripple", isOn: $workspace.whiteboardRipple).toggleStyle(.button)
-            Button { changeZoom(0.8) } label: { Image(systemName: "minus.magnifyingglass") }
-            Text("\(Int(board.viewport.zoom * 100))%").monospacedDigit().frame(width: 36)
-            Button { changeZoom(1.25) } label: { Image(systemName: "plus.magnifyingglass") }
-            Spacer()
-            ForEach(BoardPaletteItem.allCases, id: \.rawValue) { kind in
-                Button(kind == .lane ? "Lane" : kind.rawValue.capitalized) { createPaletteItem(kind) }
-                    .onDrag { NSItemProvider(object: ("frontstage-palette:" + kind.rawValue) as NSString) }
-                    .help("Drag onto the whiteboard to create a \(kind.rawValue)")
-            }
-            Menu("Layer Settings") {
-                ForEach(board.layers) { layer in
-                    Toggle("\(layer.name): Use Blocks\(layer.useBlocks == nil && board.blocks.contains(where: { $0.layerID == layer.id && $0.standalone != true && $0.containerKind != "beatGroup" }) ? " (legacy layout)" : "")", isOn: Binding(get: { board.usesBlocks(layer.id) }, set: { enabled in workspace.edit("Layer Block Policy") { try $0.setLayerUsesBlocks(layer.id, enabled: enabled) } }))
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                Button { drawing = false } label: { Image(systemName: "cursorarrow") }.tint(drawing ? .gray : .cyan)
+                Button { drawing.toggle() } label: { Image(systemName: "pencil.tip") }.tint(drawing ? .cyan : .gray)
+                    .help("Draw board annotations (hold Option/ALT to erase)")
+                Button { fitRequest += 1 } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }.help("Fit selection or board")
+                Toggle("Push", isOn: $pushing).toggleStyle(.button).help("Push space open or closed; also Command-drag on the board")
+                Toggle("Ripple", isOn: $workspace.whiteboardRipple).toggleStyle(.button)
+                Button { changeZoom(0.8) } label: { Image(systemName: "minus.magnifyingglass") }
+                Text("\(Int((board.viewport.zoom * 100).rounded()))%").monospacedDigit().frame(width: 36)
+                Button { changeZoom(1.25) } label: { Image(systemName: "plus.magnifyingglass") }
+                Divider().frame(height: 18)
+                ForEach(BoardPaletteItem.allCases, id: \.rawValue) { kind in
+                    Button(kind == .lane ? "Lane" : kind.rawValue.capitalized) { createPaletteItem(kind) }
+                        .onDrag { NSItemProvider(object: ("frontstage-palette:" + kind.rawValue) as NSString) }
+                        .help("Drag onto the whiteboard to create a \(kind.rawValue)")
                 }
+                Divider().frame(height: 18)
+                Menu("Layer Settings") {
+                    ForEach(board.layers) { layer in
+                        Toggle("\(layer.name): Use Blocks\(layer.useBlocks == nil && board.blocks.contains(where: { $0.layerID == layer.id && $0.standalone != true && $0.containerKind != "beatGroup" }) ? " (legacy layout)" : "")", isOn: Binding(get: { board.usesBlocks(layer.id) }, set: { enabled in workspace.edit("Layer Block Policy") { try $0.setLayerUsesBlocks(layer.id, enabled: enabled) } }))
+                    }
+                }
+                Button("Add to Block") { workspace.addWhiteboardBeat(blockID: workspace.selectedBoardBeat?.blockID) }
+                    .disabled(workspace.selectedBoardBeat == nil)
+                Menu {
+                    Button("Wrap Selection in Block") { workspace.edit("Group Blocks") { try $0.groupBoardBlocks(blockSelection.isEmpty ? Set(board.beats.filter { selection.contains($0.id) }.map(\.blockID)) : blockSelection, name: "New Block") } }
+                        .disabled(blockSelection.isEmpty && selection.isEmpty)
+                    Button("Unwrap Selected Blocks") { workspace.edit("Ungroup Blocks") { try $0.ungroupBoardBlocks(blockSelection) } }
+                        .disabled(!board.blocks.contains { $0.parentID.map(blockSelection.contains) == true || ($0.containerKind == "beatGroup" && blockSelection.contains($0.id)) })
+                    Button("Resolve Causal Flow") { workspace.edit("Resolve Causes") { try $0.editWhiteboard { try $0.resolveCauses() } } }
+                    Button("Compact Causal Time") { workspace.edit("Compact Causal Time") { try $0.editWhiteboard { try $0.compactCauses() } } }
+                        .help("Remove time gaps while respecting causes and locked starts. Board placement stays independent.")
+                    Button("Add Act / Marker…") { editMarker() }
+                    Button("Apply Story Order to Script") { workspace.edit("Apply Story Order") { try $0.applyWhiteboardStoryOrder() } }
+                    Button("Merge Selected Snippets") { workspace.edit("Merge Snippets") { try $0.mergeBoardBeats(selection) } }.disabled(selection.count < 2)
+                    Button("Clear Annotations") { workspace.edit("Clear Drawing") { try $0.editWhiteboard { $0.strokes = [] } } }
+                } label: { Text("Board Actions") }
+                Spacer()
+                Text("\(board.beats.count) beats").foregroundStyle(.secondary)
             }
-            Button("Add to Block") { workspace.addWhiteboardBeat(blockID: workspace.selectedBoardBeat?.blockID) }
-                .disabled(workspace.selectedBoardBeat == nil)
-            Menu {
-                Button("Wrap Selection in Block") { workspace.edit("Group Blocks") { try $0.groupBoardBlocks(blockSelection.isEmpty ? Set(board.beats.filter { selection.contains($0.id) }.map(\.blockID)) : blockSelection, name: "New Block") } }
-                    .disabled(blockSelection.isEmpty && selection.isEmpty)
-                Button("Unwrap Selected Blocks") { workspace.edit("Ungroup Blocks") { try $0.ungroupBoardBlocks(blockSelection) } }
-                    .disabled(!board.blocks.contains { $0.parentID.map(blockSelection.contains) == true || ($0.containerKind == "beatGroup" && blockSelection.contains($0.id)) })
-                Button("Resolve Causal Flow") { workspace.edit("Resolve Causes") { try $0.editWhiteboard { try $0.resolveCauses() } } }
-                Button("Compact Causal Time") { workspace.edit("Compact Causal Time") { try $0.editWhiteboard { try $0.compactCauses() } } }
-                    .help("Remove time gaps while respecting causes and locked starts. Board placement stays independent.")
-                Button("Add Act / Marker…") { editMarker() }
-                Button("Apply Story Order to Script") { workspace.edit("Apply Story Order") { try $0.applyWhiteboardStoryOrder() } }
-                Button("Merge Selected Snippets") { workspace.edit("Merge Snippets") { try $0.mergeBoardBeats(selection) } }.disabled(selection.count < 2)
-                Button("Clear Annotations") { workspace.edit("Clear Drawing") { try $0.editWhiteboard { $0.strokes = [] } } }
-            } label: { Text("Board Actions") }
-            Text("\(board.beats.count) beats").foregroundStyle(.secondary)
-        }.font(.system(size: 11)).buttonStyle(.bordered).fixedSize(horizontal: true, vertical: false).padding(7)
-        }.frame(height: 48).background(Color(white: 0.2)).accessibilityIdentifier("whiteboard-bottom-tools")
+            .font(.system(size: 11))
+            .buttonStyle(.bordered)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+        .frame(height: 42)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Color(red: 0.14, green: 0.145, blue: 0.16))
+        .overlay(alignment: .top) {
+            Divider()
+        }
+        .accessibilityIdentifier("whiteboard-bottom-tools")
     }
 
     private func editMarker(_ marker: StoryMilestone? = nil) {

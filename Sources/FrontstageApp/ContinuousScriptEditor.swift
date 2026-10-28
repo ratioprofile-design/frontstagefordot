@@ -48,7 +48,6 @@ final class WritingTextView: ScreenplayTextView {
             if let id, source.attribute(ownerKey, at: location, effectiveRange: nil) as? String == id { activeHeadingRange = heading; break }
             location = NSMaxRange(range)
         }
-        if let range = activeHeadingRange { manager.addTemporaryAttribute(.backgroundColor, value: NSColor.controlAccentColor.withAlphaComponent(0.10), forCharacterRange: range) }
         needsDisplay = true
     }
     override func unmarkText() {
@@ -59,8 +58,12 @@ final class WritingTextView: ScreenplayTextView {
         let source = attributedString()
         guard !hasMarkedText(), source.length > 0, range.location <= source.length,
               typingAttributes[headingKey] != nil else { return }
-        let index = min(range.location, source.length - 1)
-        if source.attribute(headingKey, at: index, effectiveRange: nil) == nil { typingAttributes = source.attributes(at: index, effectiveRange: nil) }
+        let index = min(range.location, max(0, source.length - 1))
+        let paragraph = (source.string as NSString).paragraphRange(for: NSRange(location: index, length: 0))
+        if source.attribute(headingKey, at: paragraph.location, effectiveRange: nil) == nil {
+            typingAttributes = source.attributes(at: index, effectiveRange: nil)
+            typingAttributes.removeValue(forKey: headingKey)
+        }
     }
     override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
         prepareBodyTyping(at: replacementRange.location == NSNotFound ? self.selectedRange() : replacementRange)
@@ -79,6 +82,16 @@ final class WritingTextView: ScreenplayTextView {
             let paragraph = (source.string as NSString).paragraphRange(for: NSRange(location: destination, length: 0))
             let bodyDestination = source.length > 0 && range.location <= source.length && source.attribute(headingKey, at: destination, effectiveRange: nil) == nil
             prepareBodyTyping(at: range)
+            if let attributed = insertString as? NSAttributedString {
+                let elem = attributed.attribute(.screenplayElement, at: 0, effectiveRange: nil) as? String
+                if elem != ScreenplayElement.sceneHeading.rawValue {
+                    let body = NSMutableAttributedString(attributedString: attributed)
+                    body.removeAttribute(headingKey, range: NSRange(location: 0, length: body.length))
+                    typingAttributes.removeValue(forKey: headingKey)
+                    super.insertText(body, replacementRange: replacementRange)
+                    return
+                }
+            }
             if let attributed = insertString as? NSAttributedString, bodyDestination, NSMaxRange(range) <= NSMaxRange(paragraph) {
                 let body = NSMutableAttributedString(attributedString: attributed)
                 body.removeAttribute(headingKey, range: NSRange(location: 0, length: body.length))
@@ -173,7 +186,11 @@ struct ContinuousScriptEditor: NSViewRepresentable {
         guard let canvas = view.documentView as? WritingCanvasView, let text = canvas.paperView else { return }
         configure(text)
         let signature = context.coordinator.signature()
-        if !context.coordinator.committing && !text.hasMarkedText() && signature != context.coordinator.lastSignature { context.coordinator.load(text) }
+        if !context.coordinator.committing && !text.hasMarkedText() && signature != context.coordinator.lastSignature {
+            if text.window?.firstResponder !== text {
+                context.coordinator.load(text)
+            }
+        }
         canvas.layoutPaper()
         applyAppearance(text)
     }
@@ -317,15 +334,32 @@ struct ContinuousScriptEditor: NSViewRepresentable {
                     guard let id = owner, !pendingPullouts.contains(id) else { location = NSMaxRange(range); continue }
                     let line = string.substring(with: range).trimmingCharacters(in: .newlines)
                     let kind = ScreenplayElement(rawValue: attributes[.screenplayElement] as? String ?? "action") ?? .action
-                    if let scene = attributes[headingKey] as? String, let sceneID = Decimal(string: scene) {
+                    // Any paragraph that carries headingKey is a real scene heading — never encode it as body HTML.
+                    let isRealHeading = attributes[headingKey] != nil
+                    if isRealHeading, let scene = attributes[headingKey] as? String, let sceneID = Decimal(string: scene) {
                         if let existing = headings.firstIndex(where: { $0.sceneID == sceneID }) {
                             if range.location == changedHeading || (changedHeading == nil && range == editing) { headings[existing] = ScriptHeadingEdit(sceneID: sceneID, text: line) }
                         } else { headings.append(ScriptHeadingEdit(sceneID: sceneID, text: line)) }
+                    } else if isRealHeading {
+                        // headingKey present but Decimal parse failed — skip silently; the heading
+                        // will be corrected on the next full load.
                     } else if kind == .sceneHeading && !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                        let newID = try project.insertScriptScene(afterSplitting: id, beforeHTML: html[id] ?? "", afterHTML: "", heading: line)
-                        guard let newBeat = try project.whiteboard().beats.first(where: { $0.id == newID }) else { throw ProjectError.sceneNotFound }
-                        if let original { redirects[original] = newID }; redirects[id] = newID
-                        owner = newID; html[newID] = ""; created.append((range, newID, newBeat.sceneID))
+                        if let currentSceneID = workspace.whiteboard.beats.first(where: { $0.id == id })?.sceneID,
+                           let currentScene = project.scenes.first(where: { $0.id == currentSceneID }),
+                           (html[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           (currentScene.heading.location.isEmpty || currentScene.heading.inlineText == "INT. - DAY") {
+                            try project.updateScene(id: currentSceneID, heading: SceneHeading(inline: line))
+                            headings.removeAll { $0.sceneID == currentSceneID }
+                            headings.append(ScriptHeadingEdit(sceneID: currentSceneID, text: line))
+                            created.append((range, id, currentSceneID))
+                        } else {
+                            let newID = try project.insertScriptScene(afterSplitting: id, beforeHTML: html[id] ?? "", afterHTML: "", heading: line)
+                            guard let newBeat = try project.whiteboard().beats.first(where: { $0.id == newID }) else { throw ProjectError.sceneNotFound }
+                            if let original { redirects[original] = newID }; redirects[id] = newID
+                            owner = newID; html[newID] = ""; created.append((range, newID, newBeat.sceneID))
+                            headings.removeAll { $0.sceneID == newBeat.sceneID }
+                            headings.append(ScriptHeadingEdit(sceneID: newBeat.sceneID, text: line))
+                        }
                     } else {
                         html[id, default: ""] += ScreenplayTextCodec.encode(source.attributedSubstring(from: range))
                         assignments.append((range, id))
@@ -373,7 +407,10 @@ struct ContinuousScriptEditor: NSViewRepresentable {
             if pendingHeading == nil { synchronizeHeadings(text, excluding: active) }
             let position = min(text.selectedRange().location, max(0, text.attributedString().length - 1))
             if text.attributedString().length > 0, text.attributedString().attribute(headingKey, at: position, effectiveRange: nil) != nil {
-                text.typingAttributes = text.attributedString().attributes(at: position, effectiveRange: nil)
+                let range = (text.string as NSString).paragraphRange(for: NSRange(location: position, length: 0))
+                if text.selectedRange().location < NSMaxRange(range) || !(text.string as NSString).substring(with: range).hasSuffix("\n") {
+                    text.typingAttributes = text.attributedString().attributes(at: position, effectiveRange: nil)
+                }
             }
             if text.attributedString().length > 0, let id = text.attributedString().attribute(ownerKey, at: position, effectiveRange: nil) as? String {
                 workspace.selectBoardBeat(id)
@@ -382,6 +419,7 @@ struct ContinuousScriptEditor: NSViewRepresentable {
         }
         func textDidEndEditing(_ notification: Notification) {
             headingSuggestions.close()
+            TamilInputManager.restoreStandardInput()
             if let text = notification.object as? NSTextView { synchronizeHeadings(text, excluding: nil) }
         }
         var completionChoices: [ScreenplayElement: [String]] {
@@ -405,22 +443,209 @@ struct ContinuousScriptEditor: NSViewRepresentable {
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             guard !textView.hasMarkedText() else { return false }
             if headingSuggestions.handle(commandSelector) { return true }
+            let sel = textView.selectedRange()
+            let source = textView.attributedString()
+            let str = source.string as NSString
+            let pos = min(sel.location, max(0, source.length - 1))
+            let curRange = source.length > 0 ? str.paragraphRange(for: NSRange(location: pos, length: 0)) : NSRange(location: 0, length: 0)
+            let isHeading = source.length > 0 && (
+                source.attribute(headingKey, at: curRange.location, effectiveRange: nil) != nil ||
+                source.attribute(.screenplayElement, at: curRange.location, effectiveRange: nil) as? String == ScreenplayElement.sceneHeading.rawValue ||
+                controller.activeElement == .sceneHeading
+            )
+            if isHeading && (commandSelector == #selector(NSResponder.insertNewline(_:)) || commandSelector == #selector(NSResponder.insertTab(_:))) {
+                synchronizeHeadings(textView, excluding: nil)
+                let currentStr = textView.string as NSString
+                let heading = currentStr.paragraphRange(for: NSRange(location: min(sel.location, max(0, currentStr.length - 1)), length: 0))
+                let headingText = currentStr.substring(with: heading)
+                let hasNewline = headingText.hasSuffix("\n")
+                if !hasNewline {
+                    let headingAttrs = textView.attributedString().attributes(at: heading.location, effectiveRange: nil)
+                    textView.insertText(NSAttributedString(string: "\n", attributes: headingAttrs), replacementRange: NSRange(location: NSMaxRange(heading), length: 0))
+                }
+                let updatedStr = textView.string as NSString
+                let updatedHeading = updatedStr.paragraphRange(for: NSRange(location: heading.location, length: 0))
+                let next = NSMaxRange(updatedHeading)
+                var actionAttrs = ScreenplayTypography.attributes(.action, width: controller.contentWidth, settings: controller.typography)
+                if let owner = textView.attributedString().attribute(ownerKey, at: heading.location, effectiveRange: nil) {
+                    actionAttrs[ownerKey] = owner
+                }
+                actionAttrs.removeValue(forKey: headingKey)
+
+                if next < textView.attributedString().length {
+                    let nextElem = textView.attributedString().attribute(.screenplayElement, at: next, effectiveRange: nil) as? String
+                    let nextHasHeadingKey = textView.attributedString().attribute(headingKey, at: next, effectiveRange: nil) != nil
+                    if nextHasHeadingKey || nextElem == ScreenplayElement.sceneHeading.rawValue {
+                        textView.insertText(NSAttributedString(string: "\n", attributes: actionAttrs), replacementRange: NSRange(location: next, length: 0))
+                    }
+                    textView.setSelectedRange(NSRange(location: next, length: 0))
+                } else {
+                    textView.insertText(NSAttributedString(string: "\n", attributes: actionAttrs), replacementRange: NSRange(location: next, length: 0))
+                    textView.setSelectedRange(NSRange(location: next, length: 0))
+                }
+                var cleanTyping = ScreenplayTypography.attributes(.action, width: controller.contentWidth, settings: controller.typography)
+                cleanTyping.removeValue(forKey: headingKey)
+                if let owner = textView.attributedString().attribute(ownerKey, at: heading.location, effectiveRange: nil) {
+                    cleanTyping[ownerKey] = owner
+                }
+                textView.typingAttributes = cleanTyping
+                controller.activeElement = .action
+                controller.selectionChanged()
+                textView.scrollRangeToVisible(textView.selectedRange())
+                if let storage = textView.textStorage, storage.length > 0, next < storage.length {
+                    let bodyRange = (storage.string as NSString).paragraphRange(for: NSRange(location: next, length: 0))
+                    if storage.attribute(.screenplayElement, at: next, effectiveRange: nil) as? String == ScreenplayElement.sceneHeading.rawValue {
+                        ScreenplayTypography.apply(.action, to: storage, range: bodyRange, width: controller.contentWidth, settings: controller.typography)
+                    }
+                    storage.removeAttribute(headingKey, range: bodyRange)
+                }
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertLineBreak(_:)) || commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
+                return controller.handleCommand(commandSelector, in: textView)
+            }
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if controller.activeElement == .action {
+                    controller.format(.character)
+                    offerCompletions = true
+                    showSuggestions(textView)
+                    return true
+                }
+                if controller.activeElement == .character {
+                    let string = textView.string as NSString
+                    let para = string.paragraphRange(for: textView.selectedRange())
+                    textView.insertText("", replacementRange: para)
+                    headingSuggestions.close()
+                    controller.format(.transition)
+                    return true
+                }
+                if controller.activeElement == .transition {
+                    controller.format(.action)
+                    return true
+                }
+                if controller.activeElement == .dialogue {
+                    controller.format(.parenthetical)
+                    return true
+                }
+                if controller.activeElement == .parenthetical {
+                    controller.format(.dialogue)
+                    return true
+                }
+            }
+            if controller.activeElement == .transition && commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let str = textView.string as NSString
+                let para = str.paragraphRange(for: textView.selectedRange())
+                let end = NSMaxRange(para)
+                let terminated = para.length > 0 && str.substring(with: para).hasSuffix("\n")
+                if !terminated {
+                    textView.insertText("\n", replacementRange: NSRange(location: end, length: 0))
+                }
+                let insertPos = !terminated ? end + 1 : end
+                var headingAttrs = ScreenplayTypography.attributes(.sceneHeading, width: controller.contentWidth, settings: controller.typography)
+                if let owner = textView.attributedString().attribute(ownerKey, at: min(para.location, max(0, textView.attributedString().length - 1)), effectiveRange: nil) {
+                    headingAttrs[ownerKey] = owner
+                }
+                textView.insertText(NSAttributedString(string: "\n", attributes: headingAttrs), replacementRange: NSRange(location: insertPos, length: 0))
+                textView.setSelectedRange(NSRange(location: insertPos, length: 0))
+                textView.typingAttributes = headingAttrs
+                controller.activeElement = .sceneHeading
+                controller.selectionChanged()
+                return true
+            }
+            if controller.activeElement == .dialogue && commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let str = textView.string as NSString
+                let para = str.paragraphRange(for: textView.selectedRange())
+                let line = str.substring(with: para).trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.isEmpty {
+                    controller.format(.action)
+                    return true
+                }
+                let end = NSMaxRange(para)
+                let terminated = para.length > 0 && str.substring(with: para).hasSuffix("\n")
+                if !terminated {
+                    textView.insertText("\n", replacementRange: NSRange(location: end, length: 0))
+                }
+                let insertPos = !terminated ? end + 1 : end
+                var charAttrs = ScreenplayTypography.attributes(.character, width: controller.contentWidth, settings: controller.typography)
+                if let owner = textView.attributedString().attribute(ownerKey, at: min(para.location, max(0, textView.attributedString().length - 1)), effectiveRange: nil) {
+                    charAttrs[ownerKey] = owner
+                }
+                charAttrs.removeValue(forKey: headingKey)
+                textView.insertText(NSAttributedString(string: "\n", attributes: charAttrs), replacementRange: NSRange(location: insertPos, length: 0))
+                textView.setSelectedRange(NSRange(location: insertPos, length: 0))
+                textView.typingAttributes = charAttrs
+                controller.activeElement = .character
+                controller.selectionChanged()
+                offerCompletions = true
+                showSuggestions(textView)
+                return true
+            }
+            if controller.activeElement == .character && commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let str = textView.string as NSString
+                let para = str.paragraphRange(for: textView.selectedRange())
+                let line = str.substring(with: para).trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.isEmpty {
+                    controller.format(.action)
+                    return true
+                }
+                let cueName = CharacterCue(line).name
+                if !cueName.isEmpty && !workspace.project.characters.contains(where: { $0.name.caseInsensitiveCompare(cueName) == .orderedSame }) {
+                    workspace.edit("Register Character") { try $0.createCharacter(name: cueName) }
+                }
+                let end = NSMaxRange(para)
+                let terminated = para.length > 0 && str.substring(with: para).hasSuffix("\n")
+                if !terminated {
+                    textView.insertText("\n", replacementRange: NSRange(location: end, length: 0))
+                }
+                let insertPos = !terminated ? end + 1 : end
+                let dual = textView.attributedString().attribute(.screenplayDualDialogue, at: para.location, effectiveRange: nil) as? String
+                var dialAttrs = ScreenplayTypography.attributes(.dialogue, width: controller.contentWidth, settings: controller.typography, dualSide: dual)
+                if let owner = textView.attributedString().attribute(ownerKey, at: min(para.location, max(0, textView.attributedString().length - 1)), effectiveRange: nil) {
+                    dialAttrs[ownerKey] = owner
+                }
+                dialAttrs.removeValue(forKey: headingKey)
+                if let dual { dialAttrs[.screenplayDualDialogue] = dual }
+                textView.insertText(NSAttributedString(string: "\n", attributes: dialAttrs), replacementRange: NSRange(location: insertPos, length: 0))
+                textView.setSelectedRange(NSRange(location: insertPos, length: 0))
+                textView.typingAttributes = dialAttrs
+                controller.activeElement = .dialogue
+                controller.selectionChanged()
+                return true
+            }
+            if controller.activeElement == .parenthetical && commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                let str = textView.string as NSString
+                let para = str.paragraphRange(for: textView.selectedRange())
+                let line = str.substring(with: para).trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.isEmpty {
+                    controller.format(.action)
+                    return true
+                }
+                let end = NSMaxRange(para)
+                let terminated = para.length > 0 && str.substring(with: para).hasSuffix("\n")
+                if !terminated {
+                    textView.insertText("\n", replacementRange: NSRange(location: end, length: 0))
+                }
+                let insertPos = !terminated ? end + 1 : end
+                let dual = textView.attributedString().attribute(.screenplayDualDialogue, at: para.location, effectiveRange: nil) as? String
+                var dialAttrs = ScreenplayTypography.attributes(.dialogue, width: controller.contentWidth, settings: controller.typography, dualSide: dual)
+                if let owner = textView.attributedString().attribute(ownerKey, at: min(para.location, max(0, textView.attributedString().length - 1)), effectiveRange: nil) {
+                    dialAttrs[ownerKey] = owner
+                }
+                dialAttrs.removeValue(forKey: headingKey)
+                if let dual { dialAttrs[.screenplayDualDialogue] = dual }
+                textView.insertText(NSAttributedString(string: "\n", attributes: dialAttrs), replacementRange: NSRange(location: insertPos, length: 0))
+                textView.setSelectedRange(NSRange(location: insertPos, length: 0))
+                textView.typingAttributes = dialAttrs
+                controller.activeElement = .dialogue
+                controller.selectionChanged()
+                return true
+            }
             if let context = ScriptHeadingEditing.context(in: textView, replacing: textView.selectedRange()) {
                 if commandSelector == #selector(NSResponder.deleteBackward(_:)), textView.selectedRange() == NSRange(location: context.range.location, length: 0) { return true }
                 if [#selector(NSResponder.deleteBackward(_:)), #selector(NSResponder.deleteForward(_:))].contains(commandSelector),
                    textView.selectedRange().length > 0, NSMaxRange(textView.selectedRange()) == NSMaxRange(context.range),
                    (textView.string as NSString).substring(with: context.range).hasSuffix("\n") {
                     textView.insertText("", replacementRange: textView.selectedRange()); return true
-                }
-                if commandSelector == #selector(NSResponder.insertNewline(_:)) || commandSelector == #selector(NSResponder.insertTab(_:)) {
-                    synchronizeHeadings(textView, excluding: nil)
-                    let heading = (textView.string as NSString).paragraphRange(for: NSRange(location: context.range.location, length: 0))
-                    let next = NSMaxRange(heading)
-                    if next < textView.attributedString().length {
-                        textView.setSelectedRange(NSRange(location: next, length: 0))
-                        textView.typingAttributes = textView.attributedString().attributes(at: next, effectiveRange: nil)
-                        controller.selectionChanged(); textView.scrollRangeToVisible(textView.selectedRange()); return true
-                    }
                 }
             }
             return controller.handleCommand(commandSelector, in: textView)
@@ -433,6 +658,14 @@ struct ContinuousScriptEditor: NSViewRepresentable {
                source.attribute(headingKey, at: range.location, effectiveRange: nil) != nil { return false }
             pendingHeading = (replacementString == "\n" && range.length == 0) ? nil : ScriptHeadingEditing.context(in: textView, replacing: range)
             offerCompletions = replacementString?.isEmpty == false && replacementString?.contains("\n") != true
+            if let rep = replacementString, rep.contains("(") {
+                let string = textView.string as NSString
+                let lineRange = string.paragraphRange(for: range)
+                let line = string.substring(with: lineRange).trimmingCharacters(in: .whitespacesAndNewlines)
+                if controller.activeElement == .dialogue && line.isEmpty {
+                    controller.format(.parenthetical)
+                }
+            }
             var allowed = true
             let checked = NSRange(location: min(range.location, source.length - 1), length: max(1, min(range.length, source.length - min(range.location, source.length - 1))))
             source.enumerateAttribute(ownerKey, in: checked) { value, _, _ in

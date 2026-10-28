@@ -51,7 +51,12 @@ public struct Project: Equatable, Sendable {
             guard let payload = root["project"]?.object else {
                 throw ProjectError.invalidProject("missing project payload")
             }
-            name = root["name"]?.string ?? fallbackName
+            let storedName = root["name"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if (storedName.isEmpty || storedName == "Untitled Screenplay") && fallbackName != "Imported Screenplay" && !fallbackName.isEmpty {
+                name = fallbackName
+            } else {
+                name = storedName.isEmpty ? fallbackName : storedName
+            }
             state = payload
         } else {
             name = fallbackName

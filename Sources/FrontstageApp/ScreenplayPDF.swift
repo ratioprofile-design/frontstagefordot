@@ -48,6 +48,7 @@ enum ScreenplayPDF {
         let active = try project.orderedScript()
         guard !active.isEmpty else { throw ScreenplayPDFError.noScenes }
         let text = NSMutableAttributedString(string: "")
+        let revision = project.currentRevision
         for segment in active {
             let scene = segment.scene, number = segment.number
             let headingStart = text.length
@@ -55,16 +56,19 @@ enum ScreenplayPDF {
                 attributes: ScreenplayTypography.attributes(.sceneHeading, width: paper.contentWidth, printing: true, settings: project.scriptLayout)))
             if scene.startsNewPage { text.addAttribute(explicitPageStart, value: true, range: NSRange(location: headingStart, length: 1)) }
             let body = try ScreenplayTextCodec.decode(scene.html, width: paper.contentWidth, printing: true, settings: project.scriptLayout)
+            if let revision, let baseline = revision.sceneBaselineHTML[String(describing: scene.id)], baseline != scene.html {
+                body.addAttribute(.screenplayRevisionMark, value: true, range: NSRange(location: 0, length: body.length))
+            }
             text.append(body)
             if !text.string.hasSuffix("\n") {
                 text.append(NSAttributedString(string: "\n", attributes:
-                    ScreenplayTypography.attributes(.action, width: paper.contentWidth, printing: true)))
+                    ScreenplayTypography.attributes(.action, width: paper.contentWidth, printing: true, settings: project.scriptLayout)))
             }
         }
-        return try renderText(text, title: project.name, paper: paper)
+        return try renderText(text, title: project.name, paper: paper, revision: revision)
     }
 
-    static func renderText(_ text: NSAttributedString, title: String, paper: ScreenplayPaper) throws -> RenderedScreenplay {
+    static func renderText(_ text: NSAttributedString, title: String, paper: ScreenplayPaper, revision: ProductionRevision? = nil) throws -> RenderedScreenplay {
         let text = DialoguePresentation.materialized(text)
         guard text.length > 0 else { throw ScreenplayPDFError.cannotLayOut }
         let pages = try layoutPages(text, paper: paper)
@@ -84,6 +88,22 @@ enum ScreenplayPDF {
             let path = CGPath(rect: page.rect, transform: nil)
             let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: page.range.location, length: page.range.length), path, nil)
             CTFrameDraw(frame, context)
+
+            // Draw Revision marks (asterisks) in right margin for modified lines
+            let lines = CTFrameGetLines(frame) as! [CTLine]
+            var origins = [CGPoint](repeating: .zero, count: lines.count)
+            CTFrameGetLineOrigins(frame, CFRangeMake(0, 0), &origins)
+            for (lineIdx, ctLine) in lines.enumerated() {
+                let strRange = CTLineGetStringRange(ctLine)
+                if strRange.length > 0 {
+                    let checkLoc = page.range.location + strRange.location
+                    if checkLoc < text.length && (text.attribute(.screenplayRevisionMark, at: checkLoc, effectiveRange: nil) as? Bool) == true {
+                        let asteriskY = page.rect.origin.y + origins[lineIdx].y
+                        drawMarker("*", x: paper.width - paper.rightMargin + 12, y: asteriskY, in: context, paper: paper)
+                    }
+                }
+            }
+
             if let character = page.continuedCharacter {
                 drawMarker("\(character) (CONT'D)", x: paper.leftMargin + paper.contentWidth * WorkspaceDesign.characterIndent / 100,
                     y: paper.height - paper.topMargin - 12, in: context, paper: paper)
@@ -91,6 +111,13 @@ enum ScreenplayPDF {
             if page.continuesCharacter != nil {
                 drawMarker("(MORE)", x: paper.leftMargin + paper.contentWidth * WorkspaceDesign.characterIndent / 100,
                     y: paper.bottomMargin + 2, in: context, paper: paper)
+            }
+            if let revision {
+                let revLabel = NSAttributedString(string: revision.headerString, attributes:
+                    ScreenplayTypography.attributes(.action, width: paper.contentWidth, printing: true))
+                let revLine = CTLineCreateWithAttributedString(revLabel as CFAttributedString)
+                context.textPosition = CGPoint(x: paper.leftMargin, y: paper.height - 42)
+                CTLineDraw(revLine, context)
             }
             if index > 0 {
                 let label = NSAttributedString(string: "\(index + 1).", attributes:

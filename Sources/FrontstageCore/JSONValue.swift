@@ -40,6 +40,9 @@ public enum JSONValue: Codable, Equatable, Sendable {
     public var string: String? {
         if case .string(let value) = self { return value }; return nil
     }
+    public var boolean: Bool? {
+        if case .bool(let value) = self { return value }; return nil
+    }
 
     /// Remove known legacy credential fields throughout an imported document.
     /// Unknown project fields otherwise remain intact. This is not a general secret scanner.

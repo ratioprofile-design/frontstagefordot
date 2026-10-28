@@ -4,52 +4,119 @@ import FrontstageCore
 
 extension NSAttributedString.Key {
     static let screenplayElement = NSAttributedString.Key("design.ratioprofile.frontstage.element")
+    static let screenplayDualDialogue = NSAttributedString.Key("design.ratioprofile.frontstage.dualDialogue")
+    static let screenplayRevisionMark = NSAttributedString.Key("design.ratioprofile.frontstage.revisionMark")
 }
 
 @MainActor
 enum ScreenplayTypography {
     static func attributes(_ element: ScreenplayElement, width: CGFloat,
-                           printing: Bool = false, settings: ScriptLayoutSettings = .init()) -> [NSAttributedString.Key: Any] {
+                           printing: Bool = false, settings: ScriptLayoutSettings = .init(),
+                           dualSide: String? = nil, isRevised: Bool = false) -> [NSAttributedString.Key: Any] {
+        let fontName = settings.effectiveFontName(for: element)
+        let fontSize = settings.effectiveFontSize(for: element)
+        let isBold = settings.isBold(for: element)
+        let isItalic = settings.isItalic(for: element)
+        let isUnderline = settings.isUnderline(for: element)
+
+        let isTamil = settings.isTamil(for: element)
+        var resolvedFontName = fontName
+        if isTamil && (settings.elements[element.rawValue]?.fontName == nil || fontName == settings.fontName) {
+            resolvedFontName = NSFont(name: "InaiMathi", size: fontSize) != nil ? "InaiMathi" : "Tamil Sangam MN"
+        }
+
         let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = settings.lineHeight
-        paragraph.maximumLineHeight = settings.lineHeight
+        let elemLineHeight = max(settings.lineHeight, isTamil ? fontSize * 1.45 : fontSize * 1.25)
+        paragraph.minimumLineHeight = elemLineHeight
+        paragraph.maximumLineHeight = elemLineHeight
         paragraph.paragraphSpacing = settings.paragraphSpacing
-        switch element {
-        case .character:
-            paragraph.headIndent = width * WorkspaceDesign.characterIndent / 100
-            paragraph.tailIndent = 0
-            paragraph.paragraphSpacing = 0
-        case .dialogue:
-            paragraph.headIndent = width * WorkspaceDesign.dialogueIndent / 100
-            paragraph.tailIndent = -width * WorkspaceDesign.dialogueIndent / 100
-        case .parenthetical:
-            paragraph.headIndent = width * WorkspaceDesign.parentheticalIndent / 100
-            paragraph.tailIndent = -width * WorkspaceDesign.parentheticalRight / 100
-            paragraph.paragraphSpacing = 0
-        case .transition:
-            paragraph.headIndent = width * 0.55
-            paragraph.alignment = .right
-            paragraph.paragraphSpacingBefore = 10
-        case .sceneHeading, .shot:
-            paragraph.paragraphSpacingBefore = 10
-        default: break
+
+        let halfColWidth = max(140, (width - 24) / 2)
+        if dualSide == "left" {
+            switch element {
+            case .character:
+                paragraph.headIndent = halfColWidth * 0.28
+                paragraph.tailIndent = -halfColWidth - 24
+                paragraph.paragraphSpacing = 0
+            case .dialogue:
+                paragraph.headIndent = 0
+                paragraph.tailIndent = -halfColWidth - 24
+            case .parenthetical:
+                paragraph.headIndent = halfColWidth * 0.12
+                paragraph.tailIndent = -halfColWidth - 24
+                paragraph.paragraphSpacing = 0
+            default: break
+            }
+        } else if dualSide == "right" {
+            let rightStart = halfColWidth + 24
+            switch element {
+            case .character:
+                paragraph.headIndent = rightStart + halfColWidth * 0.28
+                paragraph.tailIndent = 0
+                paragraph.paragraphSpacing = 0
+            case .dialogue:
+                paragraph.headIndent = rightStart
+                paragraph.tailIndent = 0
+            case .parenthetical:
+                paragraph.headIndent = rightStart + halfColWidth * 0.12
+                paragraph.tailIndent = 0
+                paragraph.paragraphSpacing = 0
+            default: break
+            }
+        } else {
+            switch element {
+            case .character:
+                paragraph.headIndent = width * WorkspaceDesign.characterIndent / 100
+                paragraph.tailIndent = 0
+                paragraph.paragraphSpacing = 0
+            case .dialogue:
+                paragraph.headIndent = width * WorkspaceDesign.dialogueIndent / 100
+                paragraph.tailIndent = -width * WorkspaceDesign.dialogueIndent / 100
+            case .parenthetical:
+                paragraph.headIndent = width * WorkspaceDesign.parentheticalIndent / 100
+                paragraph.tailIndent = -width * WorkspaceDesign.parentheticalRight / 100
+                paragraph.paragraphSpacing = 0
+            case .transition:
+                paragraph.headIndent = width * 0.55
+                paragraph.alignment = .right
+                paragraph.paragraphSpacingBefore = 10
+            case .sceneHeading, .shot:
+                paragraph.paragraphSpacingBefore = 10
+            default: break
+            }
         }
         paragraph.firstLineHeadIndent = paragraph.headIndent
-        let base = NSFont(name: settings.fontName, size: settings.fontSize) ?? .monospacedSystemFont(ofSize: settings.fontSize, weight: .regular)
-        let font: NSFont
-        if [.sceneHeading, .transition, .shot].contains(element) {
-            font = NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
-        } else { font = base }
-        return [.font: font, .paragraphStyle: paragraph,
-                .foregroundColor: printing ? NSColor.black : NSColor.textColor,
-                .screenplayElement: element.rawValue]
+
+        let base = NSFont(name: resolvedFontName, size: fontSize) ?? .monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        var font = base
+        var traits: NSFontTraitMask = []
+        if isBold { traits.insert(.boldFontMask) }
+        if isItalic { traits.insert(.italicFontMask) }
+        if !traits.isEmpty {
+            font = NSFontManager.shared.convert(base, toHaveTrait: traits)
+        }
+
+        var attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .paragraphStyle: paragraph,
+            .foregroundColor: printing ? NSColor.black : NSColor.textColor,
+            .screenplayElement: element.rawValue
+        ]
+        if let dualSide { attrs[.screenplayDualDialogue] = dualSide }
+        if isRevised { attrs[.screenplayRevisionMark] = true }
+        if isUnderline {
+            attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+        }
+        return attrs
     }
 
     static func apply(_ element: ScreenplayElement, to text: NSMutableAttributedString,
-                      range: NSRange, width: CGFloat, printing: Bool = false, settings: ScriptLayoutSettings = .init()) {
+                      range: NSRange, width: CGFloat, printing: Bool = false, settings: ScriptLayoutSettings = .init(),
+                      dualSide: String? = nil, isRevised: Bool = false) {
         guard range.length > 0 else { return }
-        let attributes = attributes(element, width: width, printing: printing, settings: settings)
-        // Retain inline emphasis while normalizing the screenplay font and paragraph geometry.
+        let currentDual = dualSide ?? (text.attribute(.screenplayDualDialogue, at: range.location, effectiveRange: nil) as? String)
+        let currentRev = isRevised || (text.attribute(.screenplayRevisionMark, at: range.location, effectiveRange: nil) as? Bool ?? false)
+        let attributes = attributes(element, width: width, printing: printing, settings: settings, dualSide: currentDual, isRevised: currentRev)
         var fonts: [(NSRange, NSFontTraitMask)] = []
         text.enumerateAttribute(.font, in: range) { value, run, _ in
             if let font = value as? NSFont { fonts.append((run, NSFontManager.shared.traits(of: font))) }
@@ -69,6 +136,12 @@ enum ScreenplayTypography {
 /// Mark only leaf blocks so a wrapper around multiple paragraphs never creates spurious blank lines.
 @MainActor
 enum ScreenplayTextCodec {
+    struct BlockMeta {
+        let type: ScreenplayElement
+        let dual: String?
+        let revised: Bool
+    }
+
     static func decode(_ html: String, width: CGFloat = 432,
                        printing: Bool = false, settings: ScriptLayoutSettings = .init()) throws -> NSMutableAttributedString {
         let token = "FS\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))_"
@@ -79,12 +152,12 @@ enum ScreenplayTextCodec {
         ], documentAttributes: nil)
         let regex = try NSRegularExpression(pattern: "\(token)([0-9]+)END")
         let matches = regex.matches(in: text.string, range: NSRange(location: 0, length: text.length))
-        var events: [(Int, ScreenplayElement)] = []
+        var events: [(Int, BlockMeta)] = []
         var removed = 0
         for match in matches {
             let key = (text.string as NSString).substring(with: match.range(at: 1))
-            if let index = Int(key), marked.types.indices.contains(index) {
-                events.append((match.range.location - removed, marked.types[index]))
+            if let index = Int(key), marked.metas.indices.contains(index) {
+                events.append((match.range.location - removed, marked.metas[index]))
             }
             removed += match.range.length
         }
@@ -94,15 +167,19 @@ enum ScreenplayTextCodec {
         for (index, event) in events.enumerated() {
             let end = index + 1 < events.count ? events[index + 1].0 : text.length
             if end > event.0 {
-                text.addAttribute(.screenplayElement, value: event.1.rawValue,
-                                  range: NSRange(location: event.0, length: end - event.0))
+                let range = NSRange(location: event.0, length: end - event.0)
+                text.addAttribute(.screenplayElement, value: event.1.type.rawValue, range: range)
+                if let dual = event.1.dual { text.addAttribute(.screenplayDualDialogue, value: dual, range: range) }
+                if event.1.revised { text.addAttribute(.screenplayRevisionMark, value: true, range: range) }
             }
         }
         var location = 0
         while location < text.length {
             let range = (text.string as NSString).paragraphRange(for: NSRange(location: location, length: 0))
             let element = element(in: text, at: location)
-            ScreenplayTypography.apply(element, to: text, range: range, width: width, printing: printing, settings: settings)
+            let dual = text.attribute(.screenplayDualDialogue, at: location, effectiveRange: nil) as? String
+            let rev = (text.attribute(.screenplayRevisionMark, at: location, effectiveRange: nil) as? Bool) == true
+            ScreenplayTypography.apply(element, to: text, range: range, width: width, printing: printing, settings: settings, dualSide: dual, isRevised: rev)
             location = NSMaxRange(range)
         }
         return text
@@ -136,7 +213,11 @@ enum ScreenplayTextCodec {
                 inner += value
             }
             let type = element(in: text, at: paragraph.location)
-            blocks.append("<div class=\"sc-line sc-\(type.rawValue)\">\(inner.isEmpty ? "<br>" : inner)</div>")
+            let dual = text.attribute(.screenplayDualDialogue, at: paragraph.location, effectiveRange: nil) as? String
+            let dualClass = dual.map { " sc-dual-\($0)" } ?? ""
+            let isRev = (text.attribute(.screenplayRevisionMark, at: paragraph.location, effectiveRange: nil) as? Bool) == true
+            let revClass = isRev ? " sc-rev" : ""
+            blocks.append("<div class=\"sc-line sc-\(type.rawValue)\(dualClass)\(revClass)\" style=\"white-space: pre-wrap;\">\(inner.isEmpty ? "<br>" : inner)</div>")
             location = NSMaxRange(paragraph)
         }
         return blocks.joined()
@@ -150,8 +231,7 @@ enum ScreenplayTextCodec {
             .replacingOccurrences(of: "\t", with: "&#9;")
     }
 
-    private static func markLeafBlocks(_ html: String, token: String) -> (html: String, types: [ScreenplayElement]) {
-        // This scanner only transports paragraph metadata. AppKit handles HTML parsing and entities.
+    private static func markLeafBlocks(_ html: String, token: String) -> (html: String, metas: [BlockMeta]) {
         guard let tags = try? NSRegularExpression(pattern: #"<!--[\s\S]*?-->|<(?:"[^"]*"|'[^']*'|[^'">])*>"#),
               let names = try? NSRegularExpression(pattern: #"^<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9]*)"#),
               let classes = try? NSRegularExpression(pattern: #"\sclass\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#,
@@ -159,8 +239,8 @@ enum ScreenplayTextCodec {
         let source = html as NSString
         let blockTags: Set<String> = ["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"]
         let voidTags: Set<String> = ["br", "hr", "img", "input", "meta", "link", "wbr", "source", "area", "base", "embed", "param", "col", "track"]
-        var stack: [(name: String, type: ScreenplayElement, block: Int?)] = []
-        var blocks: [(position: Int, type: ScreenplayElement, hasChild: Bool)] = []
+        var stack: [(name: String, meta: BlockMeta, block: Int?)] = []
+        var blocks: [(position: Int, meta: BlockMeta, hasChild: Bool)] = []
         for match in tags.matches(in: html, range: NSRange(location: 0, length: source.length)) {
             let tag = source.substring(with: match.range) as NSString
             guard let nameMatch = names.firstMatch(in: tag as String, range: NSRange(location: 0, length: tag.length)) else { continue }
@@ -169,28 +249,36 @@ enum ScreenplayTextCodec {
                 if let index = stack.lastIndex(where: { $0.name == name }) { stack.removeSubrange(index...) }
                 continue
             }
-            var type = stack.last?.type ?? .action
+            var type = stack.last?.meta.type ?? .action
+            var dual: String? = stack.last?.meta.dual
+            var rev: Bool = stack.last?.meta.revised ?? false
             if let classMatch = classes.firstMatch(in: tag as String, range: NSRange(location: 0, length: tag.length)) {
                 let classText = (1...3).filter { classMatch.range(at: $0).location != NSNotFound }
                     .map { tag.substring(with: classMatch.range(at: $0)) }.joined()
-                for word in classText.split(whereSeparator: { $0.isWhitespace }) where word.hasPrefix("sc-") {
-                    if let explicit = ScreenplayElement(rawValue: String(word.dropFirst(3))) { type = explicit }
+                for word in classText.split(whereSeparator: { $0.isWhitespace }) {
+                    if word.hasPrefix("sc-") {
+                        if word == "sc-dual-left" { dual = "left" }
+                        else if word == "sc-dual-right" { dual = "right" }
+                        else if word == "sc-rev" { rev = true }
+                        else if let explicit = ScreenplayElement(rawValue: String(word.dropFirst(3))) { type = explicit }
+                    }
                 }
             }
             var block: Int?
+            let currentMeta = BlockMeta(type: type, dual: dual, revised: rev)
             if blockTags.contains(name), !stack.contains(where: { ["head", "style", "script"].contains($0.name) }) {
                 if let parent = stack.last(where: { $0.block != nil })?.block { blocks[parent].hasChild = true }
                 block = blocks.count
-                blocks.append((NSMaxRange(match.range), type, false))
+                blocks.append((NSMaxRange(match.range), currentMeta, false))
             }
-            if !voidTags.contains(name), !((tag as String).hasSuffix("/>")) { stack.append((name, type, block)) }
+            if !voidTags.contains(name), !((tag as String).hasSuffix("/>")) { stack.append((name, currentMeta, block)) }
         }
         let leaves = blocks.filter { !$0.hasChild }
         let output = NSMutableString(string: html)
         for (index, block) in leaves.enumerated().reversed() {
             output.insert("\(token)\(index)END", at: block.position)
         }
-        return (output as String, leaves.map(\.type))
+        return (output as String, leaves.map(\.meta))
     }
 }
 #endif

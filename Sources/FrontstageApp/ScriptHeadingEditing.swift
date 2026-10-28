@@ -22,15 +22,16 @@ enum ScriptHeadingEditing {
     }
     static func bookmark(_ text: NSTextView) -> Bookmark? {
         let source = text.attributedString(), selection = text.selectedRange()
-        guard source.length > 0, selection.location < source.length,
-              let id = source.attribute(owner, at: selection.location, effectiveRange: nil) as? String else { return nil }
-        let isHeading = source.attribute(heading, at: selection.location, effectiveRange: nil) != nil
+        guard source.length > 0, selection.location <= source.length else { return nil }
+        let pos = min(selection.location, max(0, source.length - 1))
+        guard let id = source.attribute(owner, at: pos, effectiveRange: nil) as? String else { return nil }
+        let isHeading = source.attribute(heading, at: pos, effectiveRange: nil) != nil
         var location = 0, ordinal = 0
         while location < source.length {
             let range = (source.string as NSString).paragraphRange(for: NSRange(location: location, length: 0))
             if source.attribute(owner, at: location, effectiveRange: nil) as? String == id,
                (source.attribute(heading, at: location, effectiveRange: nil) != nil) == isHeading {
-                if selection.location < NSMaxRange(range) {
+                if selection.location <= NSMaxRange(range) {
                     guard NSMaxRange(selection) <= NSMaxRange(range) else { return nil }
                     return Bookmark(ownerID: id, isHeading: isHeading, ordinal: ordinal, offset: selection.location - location, length: selection.length,
                                     affinity: text.selectionAffinity, draft: isHeading ? (source.string as NSString).substring(with: range) : nil)
@@ -64,8 +65,9 @@ enum ScriptHeadingEditing {
     }
     static func context(in text: NSTextView, replacing selection: NSRange) -> Context? {
         let source = text.attributedString(), string = source.string as NSString
-        guard source.length > 0, selection.location < source.length, NSMaxRange(selection) <= source.length else { return nil }
-        let range = string.paragraphRange(for: NSRange(location: selection.location, length: 0))
+        guard source.length > 0, selection.location <= source.length, NSMaxRange(selection) <= source.length else { return nil }
+        let pos = min(selection.location, max(0, source.length - 1))
+        let range = string.paragraphRange(for: NSRange(location: pos, length: 0))
         guard NSMaxRange(selection) <= NSMaxRange(range), source.attribute(heading, at: range.location, effectiveRange: nil) != nil else { return nil }
         return Context(range: range, attributes: source.attributes(at: range.location, effectiveRange: nil))
     }
@@ -92,9 +94,15 @@ enum ScriptHeadingEditing {
             let range = (storage.string as NSString).paragraphRange(for: NSRange(location: location, length: 0))
             if range != active, let key = storage.attribute(heading, at: location, effectiveRange: nil) as? String,
                let id = Decimal(string: key), let scene = project.scenes.first(where: { $0.id == id }) {
-                let value = scene.heading.inlineText + "\n"
-                if (storage.string as NSString).substring(with: range) != value {
-                    changes.append((range, NSAttributedString(string: value, attributes: storage.attributes(at: location, effectiveRange: nil))))
+                let elem = storage.attribute(.screenplayElement, at: location, effectiveRange: nil) as? String
+                let line = (storage.string as NSString).substring(with: range)
+                if (elem != nil && elem != ScreenplayElement.sceneHeading.rawValue) || line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    storage.removeAttribute(heading, range: range)
+                } else {
+                    let value = scene.heading.inlineText + "\n"
+                    if line != value {
+                        changes.append((range, NSAttributedString(string: value, attributes: storage.attributes(at: location, effectiveRange: nil))))
+                    }
                 }
             }
             location = NSMaxRange(range)

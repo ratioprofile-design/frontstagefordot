@@ -99,7 +99,7 @@ public struct WhiteboardLayout: Sendable {
             if (right - left + 1) * (bottom - top + 1) > 400 { big.insert(id); continue }
             for x in left...right { for y in top...bottom { index["\(x),\(y)", default: []].insert(id) } }
         }
-        layerRects = layers; blockRects = blocks; beatRects = beats; width = maximumX; height = max(800, offset)
+        layerRects = layers; blockRects = blocks; beatRects = beats; width = max(2400, maximumX + 500); height = max(1200, offset + 500)
         cells = index; largeItems = big
     }
 

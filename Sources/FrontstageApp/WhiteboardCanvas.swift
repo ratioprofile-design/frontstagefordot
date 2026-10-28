@@ -19,7 +19,12 @@ struct WhiteboardCanvas: NSViewRepresentable {
     }
     func updateNSView(_ view: NativeWhiteboard, context: Context) {
         view.workspace = workspace; view.board = workspace.whiteboard
-        view.selection = selection; view.blockSelection = blockSelection; view.drawingMode = drawing; view.pushingMode = pushing
+        view.selection = selection; view.blockSelection = blockSelection
+        if view.drawingMode != drawing {
+            view.drawingMode = drawing
+            view.window?.invalidateCursorRects(for: view)
+        }
+        view.pushingMode = pushing
         view.selected = { ids, blocks in selection = ids; blockSelection = blocks }
         if view.fitRequest != fitRequest { view.fitRequest = fitRequest; view.fitSelection() }
         view.needsDisplay = true
@@ -29,13 +34,23 @@ struct WhiteboardCanvas: NSViewRepresentable {
 @MainActor
 final class NativeWhiteboard: NSView, NSTextFieldDelegate {
     weak var workspace: Workspace?
-    var board = Whiteboard() { didSet { geometry = WhiteboardLayout(board, measureBeat: WhiteboardBeatText.size) } }
+    var board = Whiteboard() {
+        didSet {
+            if isErasing && !erasedStrokeIDs.isEmpty {
+                board.strokes.removeAll { erasedStrokeIDs.contains($0.id) }
+            }
+            geometry = WhiteboardLayout(board, measureBeat: WhiteboardBeatText.size)
+        }
+    }
     private var geometry = WhiteboardLayout(Whiteboard())
     var selection = Set<String>()
     var blockSelection = Set<String>()
     var selected: ((Set<String>, Set<String>) -> Void)?
     var drawingMode = false
     var pushingMode = false
+    private var isErasing = false
+    private var eraserStroke: [BoardPoint] = []
+    private var erasedStrokeIDs = Set<String>()
     private var pushOrigin: BoardPoint?
     private var dependencyOrigin: String?
     var fitRequest = 0
@@ -231,6 +246,7 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
         }
         for item in board.strokes { drawStroke(item.points, color: NSColor(boardHex: item.color), width: item.width) }
         if !stroke.isEmpty { drawStroke(stroke, color: .systemYellow, width: 2) }
+        if isErasing && !eraserStroke.isEmpty { drawEraserStroke(eraserStroke) }
         if let marquee {
             NSColor.systemCyan.withAlphaComponent(0.12).setFill()
             let frame = NSRect(x: marquee.x, y: marquee.y, width: marquee.width, height: marquee.height)
@@ -249,11 +265,175 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
         for point in points.dropFirst() { path.line(to: NSPoint(x: point.x, y: point.y)) }
         path.lineWidth = width; path.lineCapStyle = .round; color.setStroke(); path.stroke()
     }
+    private func drawEraserStroke(_ points: [BoardPoint]) {
+        guard let first = points.first else { return }
+        let eraserRadius = max(10.0, 16.0 / zoom)
+        if points.count > 1 {
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: first.x, y: first.y))
+            for pt in points.dropFirst() { path.line(to: NSPoint(x: pt.x, y: pt.y)) }
+            path.lineWidth = eraserRadius
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            NSColor.systemRed.withAlphaComponent(0.3).setStroke()
+            path.stroke()
+
+            let innerPath = NSBezierPath()
+            innerPath.move(to: NSPoint(x: first.x, y: first.y))
+            for pt in points.dropFirst() { innerPath.line(to: NSPoint(x: pt.x, y: pt.y)) }
+            innerPath.lineWidth = 1.5 / zoom
+            innerPath.setLineDash([4 / zoom, 4 / zoom], count: 2, phase: 0)
+            NSColor.white.withAlphaComponent(0.85).setStroke()
+            innerPath.stroke()
+        }
+        if let last = points.last {
+            let tipRect = NSRect(x: last.x - eraserRadius / 2, y: last.y - eraserRadius / 2, width: eraserRadius, height: eraserRadius)
+            NSColor.systemRed.withAlphaComponent(0.35).setFill()
+            NSBezierPath(ovalIn: tipRect).fill()
+            NSColor.white.withAlphaComponent(0.9).setStroke()
+            let tipOutline = NSBezierPath(ovalIn: tipRect)
+            tipOutline.lineWidth = 1.5 / zoom
+            tipOutline.stroke()
+        }
+    }
+
+    private func eraseStrokesNear(point: BoardPoint) {
+        let threshold = max(16.0 / zoom, 12.0)
+        var toRemove = [String]()
+        for stroke in board.strokes {
+            if hitTestStroke(stroke, from: point, to: point, threshold: threshold) {
+                toRemove.append(stroke.id)
+            }
+        }
+        guard !toRemove.isEmpty else { return }
+        for id in toRemove { erasedStrokeIDs.insert(id) }
+        board.strokes.removeAll { erasedStrokeIDs.contains($0.id) }
+    }
+
+    private func eraseStrokesIntersecting(from p1: BoardPoint, to p2: BoardPoint) {
+        let threshold = max(16.0 / zoom, 12.0)
+        var toRemove = [String]()
+        for stroke in board.strokes {
+            if hitTestStroke(stroke, from: p1, to: p2, threshold: threshold) {
+                toRemove.append(stroke.id)
+            }
+        }
+        guard !toRemove.isEmpty else { return }
+        for id in toRemove { erasedStrokeIDs.insert(id) }
+        board.strokes.removeAll { erasedStrokeIDs.contains($0.id) }
+    }
+
+    private func strokeAt(_ point: BoardPoint) -> BoardStroke? {
+        let threshold = max(16.0 / zoom, 12.0)
+        for stroke in board.strokes.reversed() {
+            if hitTestStroke(stroke, from: point, to: point, threshold: threshold) {
+                return stroke
+            }
+        }
+        return nil
+    }
+
+    private func hitTestStroke(_ stroke: BoardStroke, from p1: BoardPoint, to p2: BoardPoint, threshold: Double) -> Bool {
+        guard !stroke.points.isEmpty else { return false }
+        let strokeThreshold = max(threshold, stroke.width / 2 + threshold)
+        let threshSq = strokeThreshold * strokeThreshold
+
+        var minX = stroke.points[0].x, maxX = stroke.points[0].x
+        var minY = stroke.points[0].y, maxY = stroke.points[0].y
+        for pt in stroke.points {
+            if pt.x < minX { minX = pt.x }
+            if pt.x > maxX { maxX = pt.x }
+            if pt.y < minY { minY = pt.y }
+            if pt.y > maxY { maxY = pt.y }
+        }
+        let eMinX = min(p1.x, p2.x) - strokeThreshold
+        let eMaxX = max(p1.x, p2.x) + strokeThreshold
+        let eMinY = min(p1.y, p2.y) - strokeThreshold
+        let eMaxY = max(p1.y, p2.y) + strokeThreshold
+
+        if maxX < eMinX || minX > eMaxX || maxY < eMinY || minY > eMaxY {
+            return false
+        }
+
+        if stroke.points.count == 1 {
+            let pt = stroke.points[0]
+            return distanceSqToSegment(pt, p1, p2) <= threshSq
+        }
+
+        for i in 0..<(stroke.points.count - 1) {
+            let a = stroke.points[i]
+            let b = stroke.points[i + 1]
+
+            if segmentsIntersect(p1, p2, a, b) {
+                return true
+            }
+            if distanceSqToSegment(p1, a, b) <= threshSq || distanceSqToSegment(p2, a, b) <= threshSq {
+                return true
+            }
+            if distanceSqToSegment(a, p1, p2) <= threshSq || distanceSqToSegment(b, p1, p2) <= threshSq {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func distanceSqToSegment(_ p: BoardPoint, _ a: BoardPoint, _ b: BoardPoint) -> Double {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let lenSq = dx * dx + dy * dy
+        if lenSq < 1e-9 {
+            let px = p.x - a.x, py = p.y - a.y
+            return px * px + py * py
+        }
+        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
+        let projX = a.x + t * dx
+        let projY = a.y + t * dy
+        let distDx = p.x - projX, distDy = p.y - projY
+        return distDx * distDx + distDy * distDy
+    }
+
+    private func segmentsIntersect(_ a: BoardPoint, _ b: BoardPoint, _ c: BoardPoint, _ d: BoardPoint) -> Bool {
+        func ccw(_ p1: BoardPoint, _ p2: BoardPoint, _ p3: BoardPoint) -> Double {
+            (p3.y - p1.y) * (p2.x - p1.x) - (p2.y - p1.y) * (p3.x - p1.x)
+        }
+        func onSegment(_ p: BoardPoint, _ s1: BoardPoint, _ s2: BoardPoint) -> Bool {
+            p.x >= min(s1.x, s2.x) - 1e-5 && p.x <= max(s1.x, s2.x) + 1e-5 &&
+            p.y >= min(s1.y, s2.y) - 1e-5 && p.y <= max(s1.y, s2.y) + 1e-5
+        }
+
+        if max(a.x, b.x) < min(c.x, d.x) || min(a.x, b.x) > max(c.x, d.x) ||
+           max(a.y, b.y) < min(c.y, d.y) || min(a.y, b.y) > max(c.y, d.y) {
+            return false
+        }
+        let d1 = ccw(a, b, c)
+        let d2 = ccw(a, b, d)
+        let d3 = ccw(c, d, a)
+        let d4 = ccw(c, d, b)
+
+        if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+           ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)) {
+            return true
+        }
+        if abs(d1) < 1e-5 && onSegment(c, a, b) { return true }
+        if abs(d2) < 1e-5 && onSegment(d, a, b) { return true }
+        if abs(d3) < 1e-5 && onSegment(a, c, d) { return true }
+        if abs(d4) < 1e-5 && onSegment(b, c, d) { return true }
+        return false
+    }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil), worldPoint = world(point)
         viewStart = point; dragStart = worldPoint; dragDelta = .init()
+        if event.modifierFlags.contains(.option) && (drawingMode || strokeAt(worldPoint) != nil) {
+            isErasing = true
+            eraserStroke = [worldPoint]
+            erasedStrokeIDs.removeAll()
+            eraseStrokesNear(point: worldPoint)
+            NSCursor.disappearingItem.set()
+            needsDisplay = true
+            return
+        }
         if event.modifierFlags.contains(.option), let beat = geometry.hitBeat(worldPoint) { dependencyOrigin = beat; return }
         if pushingMode || event.modifierFlags.contains(.command) { pushOrigin = worldPoint; return }
         if spaceHeld || event.modifierFlags.contains(.option) { panStart = board.viewport.origin; return }
@@ -314,6 +494,17 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if isErasing {
+            let point = convert(event.locationInWindow, from: nil), current = world(point)
+            if let previous = eraserStroke.last {
+                eraseStrokesIntersecting(from: previous, to: current)
+            }
+            if eraserStroke.count < 10000 {
+                eraserStroke.append(current)
+            }
+            needsDisplay = true
+            return
+        }
         if dependencyOrigin != nil { return }
         if pushOrigin != nil { NSCursor.resizeLeftRight.set(); return }
         let point = convert(event.locationInWindow, from: nil), current = world(point)
@@ -333,7 +524,53 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
 
+    override func otherMouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        viewStart = point
+        panStart = board.viewport.origin
+    }
+    override func otherMouseDragged(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let panStart {
+            board.viewport.origin = BoardPoint(x: panStart.x - (point.x - viewStart.x) / zoom, y: panStart.y - (point.y - viewStart.y) / zoom)
+            needsDisplay = true
+        }
+    }
+    override func otherMouseUp(with event: NSEvent) {
+        if panStart != nil {
+            panStart = nil
+            persistViewport()
+            needsDisplay = true
+        }
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if isErasing {
+            isErasing = false
+            eraserStroke = []
+            let removedIDs = erasedStrokeIDs
+            erasedStrokeIDs.removeAll()
+            if drawingMode {
+                if NSEvent.modifierFlags.contains(.option) {
+                    NSCursor.disappearingItem.set()
+                } else {
+                    NSCursor.crosshair.set()
+                }
+            } else {
+                NSCursor.arrow.set()
+            }
+            if !removedIDs.isEmpty {
+                workspace?.edit("Erase Annotation") { project in
+                    try project.editWhiteboard { board in
+                        board.strokes.removeAll { removedIDs.contains($0.id) }
+                    }
+                }
+            }
+            dragStart = nil
+            needsDisplay = true
+            return
+        }
         if let cause = dependencyOrigin {
             dependencyOrigin = nil; dragStart = nil
             if let effect = geometry.hitBeat(world(convert(event.locationInWindow, from: nil))), effect != cause { workspace?.edit("Create Dependency") { try $0.connectBoardBeats(cause: cause, effect: effect) } }
@@ -453,10 +690,10 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
     }
     func fitSelection() {
         let frames = selection.compactMap { geometry.beatRects[$0] }
-        let items = frames.isEmpty ? Array(geometry.blockRects.values) : frames
+        let items = frames.isEmpty ? (Array(geometry.beatRects.values) + Array(geometry.blockRects.values)) : frames
         guard let x = items.map(\.x).min(), let y = items.map(\.y).min(), let right = items.map(\.maxX).max(), let bottom = items.map(\.maxY).max() else { return }
-        board.viewport.zoom = max(0.15, min(1.5, min(bounds.width / (right - x + 100), bounds.height / (bottom - y + 100))))
-        board.viewport.origin = BoardPoint(x: x - 50, y: y - 50); persistViewport()
+        board.viewport.zoom = max(0.15, min(1.5, min((bounds.width - 60) / (right - x + 100), (bounds.height - 60) / (bottom - y + 100))))
+        board.viewport.origin = BoardPoint(x: x - 40, y: y - 40); persistViewport()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -516,6 +753,26 @@ final class NativeWhiteboard: NSView, NSTextFieldDelegate {
         super.keyDown(with: event)
     }
     override func keyUp(with event: NSEvent) { if event.keyCode == 49 { spaceHeld = false } else { super.keyUp(with: event) } }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if drawingMode {
+            let cursor: NSCursor = NSEvent.modifierFlags.contains(.option) ? .disappearingItem : .crosshair
+            addCursorRect(bounds, cursor: cursor)
+        }
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        window?.invalidateCursorRects(for: self)
+        if drawingMode {
+            if event.modifierFlags.contains(.option) {
+                NSCursor.disappearingItem.set()
+            } else {
+                NSCursor.crosshair.set()
+            }
+        }
+    }
 
     override func rightMouseDown(with event: NSEvent) {
         contextPoint = world(convert(event.locationInWindow, from: nil))

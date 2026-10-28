@@ -241,11 +241,20 @@ struct WriteNoteCard: View {
     @ObservedObject var workspace: Workspace
     let sceneID: Decimal?
     let note: WritingNote
+    @State private var editorHeight: CGFloat = 80
     var body: some View {
         VStack(alignment: .leading) {
             if note.editable {
-                NoteRichEditor(html: Binding(get: { workspace.project.writingNotes(sceneID: sceneID).first { $0.id == note.id }?.content ?? note.content }, set: { value in workspace.edit("Note Text", key: "note-\(note.id)") { try $0.updateWritingNote(sceneID: sceneID, id: note.id, content: value) } }), color: note.color)
-                    .frame(height: 150).accessibilityLabel("Note text")
+                NoteRichEditor(
+                    html: Binding(get: { workspace.project.writingNotes(sceneID: sceneID).first { $0.id == note.id }?.content ?? note.content },
+                                  set: { value in workspace.edit("Note Text", key: "note-\(note.id)") { try $0.updateWritingNote(sceneID: sceneID, id: note.id, content: value) } }),
+                    color: note.color,
+                    onHeightChange: { height in
+                        editorHeight = height
+                    }
+                )
+                .frame(height: max(70, editorHeight))
+                .accessibilityLabel("Note text")
                 Picker("Note color", selection: Binding(get: { note.color }, set: { color in workspace.edit("Note Color") { try $0.updateWritingNote(sceneID: sceneID, id: note.id, color: color) } })) {
                     ForEach(Array(zip(["#fff4bc", "#d9edff", "#e1f4dc", "#f8dce7", "#ffffff"], ["Yellow", "Blue", "Green", "Pink", "White"])), id: \.0) { color, name in
                         Label { Text(name) } icon: { Circle().fill(Color(boardHex: color)).frame(width: 12, height: 12).overlay(Circle().stroke(.gray)) }.tag(color)
@@ -276,6 +285,7 @@ final class NoteTextView: NSTextView {
 struct NoteRichEditor: NSViewRepresentable {
     @Binding var html: String
     var color = "#fff4bc"
+    var onHeightChange: ((CGFloat) -> Void)? = nil
     static let ink = NSColor(srgbRed: 0.13, green: 0.13, blue: 0.13, alpha: 1)
     func configure(_ scroll: NSScrollView, _ text: NSTextView) {
         let background = NSColor(Color(boardHex: color))
@@ -284,29 +294,47 @@ struct NoteRichEditor: NSViewRepresentable {
         text.typingAttributes[.foregroundColor] = Self.ink
         if let storage = text.textStorage, storage.length > 0 { storage.addAttribute(.foregroundColor, value: Self.ink, range: NSRange(location: 0, length: storage.length)) }
     }
-    func makeCoordinator() -> Coordinator { Coordinator($html) }
+    func makeCoordinator() -> Coordinator { Coordinator($html, onHeightChange: onHeightChange) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(), text = NoteTextView()
         text.isRichText = true; text.isEditable = context.environment.isEnabled; text.allowsUndo = true; text.isAutomaticQuoteSubstitutionEnabled = false
         text.isVerticallyResizable = true; text.autoresizingMask = [.width]; text.textContainer?.widthTracksTextView = true
-        text.delegate = context.coordinator; scroll.documentView = text; scroll.hasVerticalScroller = true
-        context.coordinator.load(html, text); configure(scroll, text); return scroll
+        text.delegate = context.coordinator; scroll.documentView = text; scroll.hasVerticalScroller = false
+        context.coordinator.load(html, text); configure(scroll, text)
+        context.coordinator.measure(text)
+        return scroll
     }
     func updateNSView(_ view: NSScrollView, context: Context) {
         context.coordinator.binding = $html
+        context.coordinator.onHeightChange = onHeightChange
         (view.documentView as? NSTextView)?.isEditable = context.environment.isEnabled
         if let text = view.documentView as? NSTextView, !text.hasMarkedText() {
             if context.coordinator.last != html { context.coordinator.load(html, text) }
             configure(view, text)
+            context.coordinator.measure(text)
         }
     }
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var binding: Binding<String>; var last = ""
-        init(_ binding: Binding<String>) { self.binding = binding }
+        var onHeightChange: ((CGFloat) -> Void)?
+        init(_ binding: Binding<String>, onHeightChange: ((CGFloat) -> Void)? = nil) {
+            self.binding = binding
+            self.onHeightChange = onHeightChange
+        }
+        func measure(_ text: NSTextView) {
+            guard let layoutManager = text.layoutManager, let textContainer = text.textContainer else { return }
+            layoutManager.ensureLayout(for: textContainer)
+            let used = layoutManager.usedRect(for: textContainer)
+            let height = max(70, ceil(used.height + text.textContainerInset.height * 2 + 12))
+            DispatchQueue.main.async { [weak self] in
+                self?.onHeightChange?(height)
+            }
+        }
         func load(_ html: String, _ text: NSTextView) {
             last = html
             if let decoded = try? NoteTextCodec.decode(safeHTML(html)) { text.textStorage?.setAttributedString(decoded) }
+            measure(text)
         }
         private func safeHTML(_ html: String) -> String {
             let allowed: Set<String> = ["p", "div", "br", "b", "strong", "i", "em", "u", "s", "ul", "ol", "li", "blockquote", "h1", "h2", "h3", "pre", "code", "hr", "a"]
@@ -347,6 +375,7 @@ struct NoteRichEditor: NSViewRepresentable {
             guard let text = notification.object as? NSTextView, !text.hasMarkedText() else { return }
             LiveNoteFormatting.apply(to: text)
             last = NoteTextCodec.encode(text.attributedString()); binding.wrappedValue = last
+            measure(text)
         }
     }
 }

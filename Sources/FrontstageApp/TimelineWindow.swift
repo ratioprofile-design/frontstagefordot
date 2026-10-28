@@ -14,7 +14,10 @@ final class TimelineWindowPresenter: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 640, height: 300)
         panel.delegate = self
-        panel.contentView = NSHostingView(rootView: StoryTimelineView(workspace: workspace, expanded: .constant(true), detached: true).preferredColorScheme(.dark))
+        let hosting = NSHostingView(rootView: StoryTimelineView(workspace: workspace, expanded: .constant(true), detached: true).preferredColorScheme(.dark))
+        hosting.wantsLayer = true
+        hosting.layer?.cornerRadius = 5
+        panel.contentView = hosting
         self.panel = panel; workspace.timelineDetached = true
         panel.center(); panel.makeKeyAndOrderFront(nil)
     }
