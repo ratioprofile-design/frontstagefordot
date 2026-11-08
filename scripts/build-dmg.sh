@@ -13,6 +13,7 @@ staging_path="$(mktemp -d "$PWD/build/dmg-staging.XXXXXX")"
 trap 'rm -rf "$staging_path"' EXIT
 ditto "$app_path" "$staging_path/DOT.app"
 ln -s /Applications "$staging_path/Applications"
+find "$staging_path" -name "._*" -delete
 hdiutil create -volname DOT -srcfolder "$staging_path" -ov -format UDZO -fs HFS+ build/DOT.dmg
 hdiutil verify build/DOT.dmg
 echo 'Built build/DOT.dmg'

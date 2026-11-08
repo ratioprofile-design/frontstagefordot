@@ -16,6 +16,7 @@ xcrun lipo "$app_path/Contents/MacOS/DOT" -verify_arch arm64 x86_64
 cp Resources/Brand/dot-light.icns "$app_path/Contents/Resources/DOT.icns"
 cp Resources/Brand/dot-app-light.png Resources/Brand/dot-app-dark.png Resources/Brand/wordmark-light.png Resources/Brand/wordmark-dark.png "$app_path/Contents/Resources/"
 cp Resources/Info.plist "$app_path/Contents/Info.plist"
+find "$app_path" -name "._*" -delete
 # Release identities enable hardened runtime signing; default artifacts remain development builds.
 if [[ -n "${FRONTSTAGE_SIGNING_IDENTITY:-}" ]]; then
   codesign --force --options runtime --timestamp --sign "$FRONTSTAGE_SIGNING_IDENTITY" "$app_path"
